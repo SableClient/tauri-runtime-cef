@@ -46,12 +46,18 @@ jobs:
             fi
           done
 
-          sed 's|tauri-runtime = { version = "[^"]*", path = "[^"]*" }|tauri-runtime = "2.11.2"|' \
-            "$UPSTREAM/Cargo.toml" > Cargo.toml.tmp
-          sed -i 's|tauri-utils = { version = "[^"]*", path = "[^"]*", features = \[|tauri-utils = { version = "2.9.2", features = [|' \
-            Cargo.toml.tmp
-          cp Cargo.toml.tmp Cargo.toml
-          rm -f Cargo.toml.tmp
+          # Cargo.toml: resolve workspace-inherited fields + convert path deps
+          sed \
+            -e 's|authors.workspace = true|authors = ["Tauri Programme within The Commons Conservancy", "byeongsu-hong"]|' \
+            -e 's|homepage.workspace = true|homepage = "https://github.com/SableClient/tauri-runtime-cef"|' \
+            -e 's|repository.workspace = true|repository = "https://github.com/SableClient/tauri-runtime-cef"|' \
+            -e 's|categories.workspace = true|categories = ["gui"]|' \
+            -e 's|license.workspace = true|license = "Apache-2.0 OR MIT"|' \
+            -e 's|edition.workspace = true|edition = "2024"|' \
+            -e 's|rust-version.workspace = true|rust-version = "1.88"|' \
+            -e 's|tauri-runtime = { version = "[^"]*", path = "[^"]*" }|tauri-runtime = "2.11.2"|' \
+            -e 's|tauri-utils = { version = "[^"]*", path = "[^"]*", features = \[|tauri-utils = { version = "2.9.2", features = [|' \
+            "$UPSTREAM/Cargo.toml" > Cargo.toml
 
       - name: Check for changes
         id: changes
@@ -70,7 +76,6 @@ jobs:
           git add -A
           git commit -m "chore: sync from tauri-apps/tauri feat/cef"
           git push --force origin "$BRANCH"
-          # Reuse existing PR if one is already open for this branch
           EXISTING=$(gh pr list --head "$BRANCH" --base main --json number -q '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
             echo "PR #$EXISTING already exists, updated branch"
