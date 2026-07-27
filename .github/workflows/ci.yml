@@ -33,7 +33,7 @@ jobs:
           shared-key: build
 
       - name: Check
-        run: cargo check --locked
+        run: cargo check
 
   clippy:
     name: Clippy
@@ -52,4 +52,4 @@ jobs:
           shared-key: clippy
 
       - name: Clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy -- -D warnings
