@@ -21,10 +21,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Checkout fork
+      - name: Checkout fork (latest main)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
       - name: Configure git
         run: |
@@ -60,7 +61,9 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           BRANCH="sync/upstream-$(date +%Y%m%d)"
-          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
+          # Always create a fresh branch from latest main
+          git checkout main
+          git checkout -B "$BRANCH"
           git add -A
           git commit -m "chore: sync from tauri-apps/tauri ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
           git push --force origin "$BRANCH"
