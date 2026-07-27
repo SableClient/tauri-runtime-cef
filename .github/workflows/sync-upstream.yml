@@ -30,34 +30,11 @@ jobs:
           git sparse-checkout set crates/tauri-runtime-cef
           git checkout feat/cef
 
-      - name: Overlay upstream files
-        run: |
-          UPSTREAM=/tmp/upstream/crates/tauri-runtime-cef
-          OVERLAY="config.rs policy.rs streaming.rs compat.rs"
-
-          for f in $(find "$UPSTREAM/src" -type f -printf "%P\n"); do
-            OVERLAY_FILE=false
-            for ol in $OVERLAY; do
-              if [ "$f" = "$ol" ]; then OVERLAY_FILE=true; fi
-            done
-            if [ "$OVERLAY_FILE" = "false" ]; then
-              mkdir -p "src/$(dirname "$f")"
-              cp "$UPSTREAM/src/$f" "src/$f"
-            fi
-          done
-
-          # Cargo.toml: resolve workspace-inherited fields + convert path deps
-          sed \
-            -e 's|authors.workspace = true|authors = ["Tauri Programme within The Commons Conservancy", "byeongsu-hong"]|' \
-            -e 's|homepage.workspace = true|homepage = "https://github.com/SableClient/tauri-runtime-cef"|' \
-            -e 's|repository.workspace = true|repository = "https://github.com/SableClient/tauri-runtime-cef"|' \
-            -e 's|categories.workspace = true|categories = ["gui"]|' \
-            -e 's|license.workspace = true|license = "Apache-2.0 OR MIT"|' \
-            -e 's|edition.workspace = true|edition = "2024"|' \
-            -e 's|rust-version.workspace = true|rust-version = "1.88"|' \
-            -e 's|tauri-runtime = { version = "[^"]*", path = "[^"]*" }|tauri-runtime = "2.11.2"|' \
-            -e 's|tauri-utils = { version = "[^"]*", path = "[^"]*", features = \[|tauri-utils = { version = "2.9.2", features = [|' \
-            "$UPSTREAM/Cargo.toml" > Cargo.toml
+      - name: Sync upstream files
+        run: python3 scripts/sync.py
+        env:
+          UPSTREAM_DIR: /tmp/upstream/crates/tauri-runtime-cef
+          FORK_ROOT: .
 
       - name: Check for changes
         id: changes
