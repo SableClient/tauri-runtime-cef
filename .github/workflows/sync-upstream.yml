@@ -41,43 +41,54 @@ jobs:
           git sparse-checkout set crates/tauri-runtime-cef
           git checkout "$BRANCH"
 
-      - name: Create upstream state commit
+      - name: Create merge with real conflicts
         run: |
           BRANCH="sync/upstream-$(date +%Y%m%d)"
-          git checkout -b "$BRANCH"
+          UPSTREAM=/tmp/upstream/crates/tauri-runtime-cef
 
+          # Create a commit representing upstream's state on a temp branch.
+          # We can't merge upstream's repo directly (it's a monorepo), so we
+          # build a synthetic commit that has upstream's files and merge it.
+          git checkout -b upstream-state
           # Save fork-only files
           mkdir -p /tmp/fork-only
           for f in src/config.rs src/policy.rs src/streaming.rs src/compat.rs; do
             [ -f "$f" ] && cp "$f" "/tmp/fork-only/$(basename $f)"
           done
-
-          # Replace all files with upstream's version
-          UPSTREAM=/tmp/upstream/crates/tauri-runtime-cef
+          # Replace with upstream
           rm -rf src/
           cp -r "$UPSTREAM/src/" src/
           cp "$UPSTREAM/Cargo.toml" Cargo.toml
-
           # Restore fork-only files
           for f in /tmp/fork-only/*.rs; do
             [ -f "$f" ] && cp "$f" "src/$(basename $f)"
           done
-
-          # Create a commit representing upstream's state
           git add -A
-          git commit -m "chore: upstream state from tauri-apps/tauri ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
+          git commit -m "upstream state from ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
 
-          # Go back to main and create the actual sync branch
+          # Go back to main and create the sync branch
           git checkout main
           git checkout -B "$BRANCH"
 
-          # Merge upstream state — produces real git conflicts
-          # where the fork and upstream both modified the same files
-          git merge "$BRANCH" --allow-unrelated-histories --no-edit || true
+          # Merge upstream state. This produces real git conflict markers
+          # where both the fork and upstream modified the same files.
+          # Do NOT auto-resolve — push with conflict markers intact.
+          git merge upstream-state --no-edit --allow-unrelated-histories 2>&1 || true
 
-          # Push the branch with conflicts visible
+          # If there are conflicts, the working tree has conflict markers.
+          # Stage everything so we can push (git requires a clean index to push,
+          # but conflict markers in staged files are fine to push).
           git add -A
-          git commit -m "chore: sync from tauri-apps/tauri ${{ github.event.inputs.upstream-branch || 'feat/cef' }} (conflicts to resolve)" --allow-empty || true
+
+          # Check if there are actual conflicts (unmerged paths)
+          if git diff --name-only --diff-filter=U | head -1 > /dev/null 2>&1 && [ -s <(git diff --name-only --diff-filter=U 2>/dev/null) ]; then
+            # Has conflicts — commit with conflict markers preserved
+            git commit -m "chore: sync from ${{ github.event.inputs.upstream-branch || 'feat/cef' }} (CONFLICTS — resolve manually)" --no-verify || true
+          else
+            # No conflicts — clean merge
+            git commit -m "chore: sync from ${{ github.event.inputs.upstream-branch || 'feat/cef' }}" --no-verify || true
+          fi
+
           git push --force origin "$BRANCH"
 
       - name: Create or update PR
@@ -91,9 +102,12 @@ jobs:
               --title "chore: sync tauri-runtime-cef from upstream ${{ github.event.inputs.upstream-branch || 'feat/cef' }}" \
               --body "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`${{ github.event.inputs.upstream-branch || 'feat/cef' }}\` branch.
 
-          This PR contains merge conflicts — both the fork's version and upstream's version are shown for each modified file. Resolve conflicts by keeping the fork's patches where needed and accepting upstream's changes where they improve things.
-
           Fork-only files preserved: \`config.rs\`, \`policy.rs\`, \`streaming.rs\`, \`compat.rs\`.
+
+          If this PR has merge conflicts, checkout the branch locally and resolve them:
+          \`\`\`
+          git fetch origin && git checkout $BRANCH
+          \`\`\`
 
           **CEF version:** check the \`cef\` pin in Cargo.toml — bump Sable's \`src-tauri/Cargo.toml\` to match."
           fi
