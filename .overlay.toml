@@ -1,28 +1,26 @@
 # Files that are local to this fork and must NOT be overwritten by upstream sync.
 # Paths are relative to src/.
-overlay:
-  - src/config.rs
-  - src/policy.rs
-  - src/streaming.rs
-  - src/compat.rs
+overlay = [
+  "src/config.rs",
+  "src/policy.rs",
+  "src/streaming.rs",
+  "src/compat.rs",
+]
 
 # Fields to resolve from workspace-inherited (.workspace = true) to concrete values.
 # Upstream Cargo.toml inherits these from the monorepo workspace root; this fork
 # is standalone and must set them explicitly.
-cargo:
-  package:
-    authors:
-      - "Tauri Programme within The Commons Conservancy"
-      - "byeongsu-hong"
-    homepage: "https://github.com/SableClient/tauri-runtime-cef"
-    repository: "https://github.com/SableClient/tauri-runtime-cef"
-    categories:
-      - "gui"
-    license: "Apache-2.0 OR MIT"
-    edition: "2024"
-    rust-version: "1.88"
-  # Dependencies to convert from path deps to version deps (the fork's key value-add).
-  # Upstream uses path = "../tauri-runtime" etc; we publish against crates.io.
-  dep-versions:
-    tauri-runtime: "2.11.2"
-    tauri-utils: "2.9.2"
+[cargo.package]
+authors = ["Tauri Programme within The Commons Conservancy", "byeongsu-hong"]
+homepage = "https://github.com/SableClient/tauri-runtime-cef"
+repository = "https://github.com/SableClient/tauri-runtime-cef"
+categories = ["gui"]
+license = "Apache-2.0 OR MIT"
+edition = "2024"
+rust-version = "1.88"
+
+# Dependencies to convert from path deps to version deps (the fork's key value-add).
+# Upstream uses path = "../tauri-runtime" etc; we publish against crates.io.
+[cargo.dep-versions]
+tauri-runtime = "2.11.2"
+tauri-utils = "2.9.2"
