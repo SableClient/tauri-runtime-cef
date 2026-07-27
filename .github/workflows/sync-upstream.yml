@@ -51,6 +51,7 @@ jobs:
           sed -i 's|tauri-utils = { version = "[^"]*", path = "[^"]*", features = \[|tauri-utils = { version = "2.9.2", features = [|' \
             Cargo.toml.tmp
           cp Cargo.toml.tmp Cargo.toml
+          rm -f Cargo.toml.tmp
 
       - name: Check for changes
         id: changes
@@ -77,7 +78,6 @@ jobs:
 
           If this PR has merge conflicts, the upstream changed \`runtime.rs\` or \`webview.rs\` in a way that requires manual porting of the overlay modules. Fix conflicts and merge.
 
-          **CEF version:** check the \`cef\` pin in Cargo.toml — bump Sable's \`src-tauri/Cargo.toml\` to match." \
-            --label "sync"
+          **CEF version:** check the \`cef\` pin in Cargo.toml — bump Sable's \`src-tauri/Cargo.toml\` to match."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
