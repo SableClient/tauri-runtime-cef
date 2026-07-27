@@ -41,59 +41,29 @@ jobs:
           git sparse-checkout set crates/tauri-runtime-cef
           git checkout "$BRANCH"
 
-      - name: Create merge with real conflicts
+      - name: Sync upstream files
+        run: python3 scripts/sync.py
+        env:
+          UPSTREAM_DIR: /tmp/upstream/crates/tauri-runtime-cef
+          FORK_ROOT: .
+
+      - name: Check for changes
+        id: changes
         run: |
-          BRANCH="sync/upstream-$(date +%Y%m%d)"
-          UPSTREAM=/tmp/upstream/crates/tauri-runtime-cef
-
-          # Create a commit representing upstream's state on a temp branch.
-          # We can't merge upstream's repo directly (it's a monorepo), so we
-          # build a synthetic commit that has upstream's files and merge it.
-          git checkout -b upstream-state
-          # Save fork-only files
-          mkdir -p /tmp/fork-only
-          for f in src/config.rs src/policy.rs src/streaming.rs src/compat.rs; do
-            [ -f "$f" ] && cp "$f" "/tmp/fork-only/$(basename $f)"
-          done
-          # Replace with upstream
-          rm -rf src/
-          cp -r "$UPSTREAM/src/" src/
-          cp "$UPSTREAM/Cargo.toml" Cargo.toml
-          # Restore fork-only files
-          for f in /tmp/fork-only/*.rs; do
-            [ -f "$f" ] && cp "$f" "src/$(basename $f)"
-          done
-          git add -A
-          git commit -m "upstream state from ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
-
-          # Go back to main and create the sync branch
-          git checkout main
-          git checkout -B "$BRANCH"
-
-          # Merge upstream state. This produces real git conflict markers
-          # where both the fork and upstream modified the same files.
-          # Do NOT auto-resolve — push with conflict markers intact.
-          git merge upstream-state --no-edit --allow-unrelated-histories 2>&1 || true
-
-          # If there are conflicts, the working tree has conflict markers.
-          # Stage everything so we can push (git requires a clean index to push,
-          # but conflict markers in staged files are fine to push).
-          git add -A
-
-          # Check if there are actual conflicts (unmerged paths)
-          if git diff --name-only --diff-filter=U | head -1 > /dev/null 2>&1 && [ -s <(git diff --name-only --diff-filter=U 2>/dev/null) ]; then
-            # Has conflicts — commit with conflict markers preserved
-            git commit -m "chore: sync from ${{ github.event.inputs.upstream-branch || 'feat/cef' }} (CONFLICTS — resolve manually)" --no-verify || true
+          if git diff --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
-            # No conflicts — clean merge
-            git commit -m "chore: sync from ${{ github.event.inputs.upstream-branch || 'feat/cef' }}" --no-verify || true
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
 
-          git push --force origin "$BRANCH"
-
-      - name: Create or update PR
+      - name: Push and create PR
+        if: steps.changes.outputs.has_changes == 'true'
         run: |
           BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
+          git add -A
+          git commit -m "chore: sync from tauri-apps/tauri ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
+          git push --force origin "$BRANCH"
           EXISTING=$(gh pr list --head "$BRANCH" --base main --json number -q '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
             echo "PR #$EXISTING already exists, updated branch"
@@ -104,12 +74,11 @@ jobs:
 
           Fork-only files preserved: \`config.rs\`, \`policy.rs\`, \`streaming.rs\`, \`compat.rs\`.
 
-          If this PR has merge conflicts, checkout the branch locally and resolve them:
-          \`\`\`
-          git fetch origin && git checkout $BRANCH
-          \`\`\`
+          If this PR has merge conflicts, the upstream changed \`runtime.rs\` or \`webview.rs\` in a way that requires manual porting of the overlay modules. Fix conflicts and merge.
 
-          **CEF version:** check the \`cef\` pin in Cargo.toml — bump Sable's \`src-tauri/Cargo.toml\` to match."
+          **CEF version:** check the \`cef\` pin in Cargo.toml, bump Sable's \`src-tauri/Cargo.toml\` to match.
+
+          **Note:** if syncing from \`amr/cef-gtk4\`, the Cargo.toml will reference \`gtk4\` and \`winit-gtk4\`, the fork's overlay config may need updating to handle the \`gtk4\` crate name and the winit git dep."
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
