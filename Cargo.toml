@@ -1,18 +1,21 @@
 [package]
 name = "tauri-runtime-cef"
 version = "0.1.0"
-description = "CEF (Chromium Embedded Framework) runtime for Tauri: Chromium renders every webview while the app keeps Tauri's Builder, commands and plugins. Ported from tauri's feat/cef branch onto published tauri crates — no fork, no [patch.crates-io]. Adds a deny-by-default Chromium permission policy the app supplies."
+description = "CEF runtime for Tauri, ported from tauri feat/cef branch onto published crates."
 authors = ["Tauri Programme within The Commons Conservancy", "byeongsu-hong"]
-repository = "https://github.com/byeongsu-hong/tauri-runtime-cef"
+homepage = "https://github.com/SableClient/tauri-runtime-cef"
+repository = "https://github.com/SableClient/tauri-runtime-cef"
+categories = ["gui"]
 license = "Apache-2.0 OR MIT"
 edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
 base64 = "0.22"
-cef = { version = "=148.0.0", features = ["build-util", "linux-x11"] }
 # Not actually used directly, just locking it.
-cef-dll-sys = { version = "=148.0.0", default-features = false }
+cef = { version = "=150.2.1", features = ["build-util", "linux-x11"] }
+# Not actually used directly, just locking it.
+cef-dll-sys = { version = "=150.2.1", default-features = false }
 dirs = "6"
 dioxus-debug-cell = "0.1"
 http = "1"
@@ -24,7 +27,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tauri-runtime = "2.11.2"
-tauri-utils = { version = "2.9.2", features = ["html-manipulation"] }
+tauri-utils = { version = "2.9.2", features = [
+  "html-manipulation",
+] }
 url = "2"
 winit = "0.31.0-beta.2"
 
@@ -85,13 +90,14 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 [target."cfg(any(target_os = \"linux\", target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"openbsd\", target_os = \"netbsd\"))".dependencies]
 dlopen2 = { version = "0.8", features = ["derive"] }
 gtk = { version = "0.18", features = ["v3_24"] }
+libc = "0.2"
 x11-dl = "2.21"
-
-[dev-dependencies]
-tauri = { version = "2", default-features = false, features = ["test"] }
 
 [features]
 default = ["sandbox"]
 devtools = []
 macos-private-api = ["tauri-runtime/macos-private-api"]
 sandbox = ["cef/sandbox"]
+
+[dev-dependencies]
+tauri = { version = "2", default-features = false, features = ["test"] }
