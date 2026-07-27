@@ -27,6 +27,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Install system dependencies
         run: |
@@ -36,6 +38,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: build
+
+      - name: Check formatting
+        run: cargo fmt --check
 
       - name: Check
         run: cargo check
