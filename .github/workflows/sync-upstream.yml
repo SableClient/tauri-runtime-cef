@@ -17,6 +17,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Sparse-checkout upstream crate
         run: |
           git clone --filter=blob:none --no-checkout --sparse \
@@ -27,12 +32,9 @@ jobs:
 
       - name: Overlay upstream files
         run: |
-          # Copy everything from upstream except our overlay modules
-          # Overlay modules (config.rs, policy.rs, streaming.rs, compat.rs) stay as-is
           UPSTREAM=/tmp/upstream/crates/tauri-runtime-cef
           OVERLAY="config.rs policy.rs streaming.rs compat.rs"
 
-          # Copy upstream files, preserving our overlay modules
           for f in $(find "$UPSTREAM/src" -type f -printf "%P\n"); do
             OVERLAY_FILE=false
             for ol in $OVERLAY; do
@@ -44,13 +46,10 @@ jobs:
             fi
           done
 
-          # Copy Cargo.toml but convert path deps to version deps
           sed 's|tauri-runtime = { version = "[^"]*", path = "[^"]*" }|tauri-runtime = "2.11.2"|' \
             "$UPSTREAM/Cargo.toml" > Cargo.toml.tmp
           sed -i 's|tauri-utils = { version = "[^"]*", path = "[^"]*", features = \[|tauri-utils = { version = "2.9.2", features = [|' \
             Cargo.toml.tmp
-          # Preserve our additions (description, authors, rust-version overrides)
-          # by keeping our Cargo.toml if the only diff is path->version
           cp Cargo.toml.tmp Cargo.toml
 
       - name: Check for changes
