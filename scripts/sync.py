@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Sync tauri-runtime-cef from tauri-apps/tauri feat/cef branch.
 
-Copies upstream files, preserves local overlay modules, resolves
-workspace-inherited Cargo.toml fields, and converts path deps to version deps.
+Strategy: for each file in upstream's src/, copy it to the fork UNLESS the fork
+already has a version that differs from upstream. Files the fork created (not
+in upstream) are always preserved. This means every fork modification — whether
+a new module or a modified copy of an upstream file — survives the sync.
+
+For Cargo.toml: resolve workspace-inherited fields and convert path deps.
 """
 
 import os
@@ -10,11 +14,6 @@ import shutil
 import sys
 import tomllib
 from pathlib import Path
-
-try:
-    import tomli_w
-except ImportError:
-    tomli_w = None  # only needed for writing TOML; we use plain string manipulation
 
 UPSTREAM = Path(
     os.environ.get("UPSTREAM_DIR", "/tmp/upstream/crates/tauri-runtime-cef")
@@ -31,212 +30,143 @@ def load_config() -> dict:
         return tomllib.load(f)
 
 
-def sync_src_files(config: dict) -> list[str]:
-    """Copy upstream src/ files, skipping overlay modules."""
-    overlay_files = set()
-    for path in config.get("overlay", []):
-        # Normalize to relative-from-src form
-        rel = path.replace("src/", "", 1) if path.startswith("src/") else path
-        overlay_files.add(rel)
+def files_equal(a: Path, b: Path) -> bool:
+    """Compare two files by content."""
+    if not a.exists() or not b.exists():
+        return False
+    return a.read_bytes() == b.read_bytes()
 
-    copied = []
+
+def sync_src_files(config: dict) -> tuple[int, int, int]:
+    """Copy upstream src/ files, preserving any fork file that differs.
+
+    Returns (copied, preserved, new_files) counts.
+    """
+    force_overwrite = set(config.get("force-overwrite", []))
     upstream_src = UPSTREAM / "src"
     fork_src = FORK_ROOT / "src"
+
+    copied = 0
+    preserved = 0
 
     for f in upstream_src.rglob("*"):
         if not f.is_file():
             continue
         rel = f.relative_to(upstream_src)
-        if str(rel) in overlay_files:
-            print(f"  PRESERVE: {rel}")
-            continue
         dest = fork_src / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, dest)
-        copied.append(str(rel))
 
-    return copied
+        rel_str = str(rel)
+        if rel_str in force_overwrite:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest)
+            copied += 1
+            continue
+
+        if dest.exists():
+            if files_equal(f, dest):
+                # Identical — no action needed (already in sync)
+                continue
+            else:
+                # Fork has a modified version — preserve it
+                print(f"  PRESERVE: {rel}")
+                preserved += 1
+        else:
+            # New file from upstream — copy it
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest)
+            copied += 1
+
+    # Count fork-only files (exist in fork, not in upstream)
+    new_files = 0
+    if fork_src.exists():
+        upstream_rels = set(
+            str(f.relative_to(upstream_src))
+            for f in upstream_src.rglob("*")
+            if f.is_file()
+        )
+        for f in fork_src.rglob("*"):
+            if f.is_file() and str(f.relative_to(fork_src)) not in upstream_rels:
+                print(f"  FORK-ONLY: {f.relative_to(fork_src)}")
+                new_files += 1
+
+    return copied, preserved, new_files
 
 
 def sync_cargo_toml(config: dict) -> None:
-    """Resolve workspace-inherited fields and convert path deps."""
+    """Resolve workspace-inherited fields and convert path deps in Cargo.toml.
+
+    Reads upstream's Cargo.toml, resolves all .workspace = true fields to
+    concrete values from .overlay.toml, converts path deps to version deps,
+    and writes the result.
+    """
     upstream_toml = UPSTREAM / "Cargo.toml"
     fork_toml = FORK_ROOT / "Cargo.toml"
 
-    with open(upstream_toml, "rb") as f:
-        upstream = tomllib.load(f)
+    # Read upstream as text to preserve structure
+    content = upstream_toml.read_text()
 
     cargo_cfg = config.get("cargo", {})
     pkg_overrides = cargo_cfg.get("package", {})
     dep_versions = cargo_cfg.get("dep-versions", {})
 
-    # Resolve workspace-inherited package fields
-    pkg = upstream.get("package", {})
+    # Resolve workspace-inherited package fields via string replacement
     for key, value in pkg_overrides.items():
-        pkg[key] = value
-
-    # Remove any remaining .workspace = true references (shouldn't happen after above)
-    # by checking all package fields
+        if isinstance(value, list):
+            val_str = "[" + ", ".join(f'"{v}"' for v in value) + "]"
+        else:
+            val_str = f'"{value}"'
+        if f"{key}.workspace = true" in content:
+            content = content.replace(f"{key}.workspace = true", f"{key} = {val_str}")
+        elif f"\n{key} = " not in content:
+            # Field doesn't exist upstream — insert after the version line
+            version_line = 'version = "0.1.0"'
+            content = content.replace(
+                version_line,
+                version_line + "\n" + f"{key} = {val_str}",
+            )
 
     # Convert path deps to version deps
-    deps = upstream.get("dependencies", {})
-    for dep_name, dep_spec in list(deps.items()):
-        if isinstance(dep_spec, dict) and "path" in dep_spec:
-            new_version = dep_versions.get(dep_name)
-            if new_version:
-                # Preserve features and other fields, drop path
-                new_spec = {k: v for k, v in dep_spec.items() if k != "path"}
-                new_spec["version"] = new_version
-                deps[dep_name] = new_spec
-                print(f"  DEP: {dep_name} path -> version={new_version}")
+    for dep_name, new_version in dep_versions.items():
+        # Match patterns like: tauri-runtime = { version = "x", path = "../tauri-runtime" }
+        # and: tauri-utils = { version = "x", path = "../tauri-utils", features = [...] }
+        import re
 
-    # Target-specific deps too
-    for target_key, target_deps in upstream.get("target", {}).items():
-        if not isinstance(target_deps, dict):
-            continue
-        for dep_name, dep_spec in list(target_deps.items()):
-            if dep_name == "dependencies" and isinstance(dep_spec, dict):
-                for dn, ds in list(dep_spec.items()):
-                    if isinstance(ds, dict) and "path" in ds:
-                        nv = dep_versions.get(dn)
-                        if nv:
-                            ns = {k: v for k, v in ds.items() if k != "path"}
-                            ns["version"] = nv
-                            dep_spec[dn] = ns
+        # Remove path = "..." from dep specs, keep version and other fields
+        pattern = rf'({dep_name}\s*=\s*\{{[^}}]*?)\s*path\s*=\s*"[^"]*",?\s*'
+        content = re.sub(pattern, r"\1", content)
+        # Clean up any trailing commas left behind
+        content = re.sub(r",\s*}", "}", content)
 
-    # Write the resolved Cargo.toml
-    # Use a simple manual serializer since we want to preserve order and formatting
-    write_cargo_toml(fork_toml, upstream)
-
-
-def write_cargo_toml(path: Path, data: dict) -> None:
-    """Write Cargo.toml preserving key order, without external deps."""
-    lines = []
-
-    def serialize_value(v, indent=""):
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return str(v)
-        if isinstance(v, str):
-            return f'"{v}"'
-        if isinstance(v, list):
-            if not v:
-                return "[]"
-            if len(v) == 1:
-                return f'["{v[0]}"]' if isinstance(v[0], str) else f"[{v[0]}]"
-            inner = ", ".join(
-                f'"{item}"' if isinstance(item, str) else str(item) for item in v
-            )
-            return f"[{inner}]"
-        return str(v)
-
-    def serialize_table(table: dict, prefix=""):
-        for key, value in table.items():
-            if isinstance(value, dict):
-                # Check if it's a simple inline table (deps with version/features)
-                if all(
-                    k != "dependencies" and k != "target" and not isinstance(v, dict)
-                    for k, v in value.items()
-                ):
-                    # Inline table
-                    inner = ", ".join(
-                        f"{k} = {serialize_value(v)}" for k, v in value.items()
-                    )
-                    lines.append(f"{prefix}{key} = {{ {inner} }}")
-                else:
-                    lines.append(f"{prefix}[{key}]")
-                    for k, v in value.items():
-                        if isinstance(v, dict) and not all(
-                            not isinstance(x, dict) for x in v.values()
-                        ):
-                            lines.append(f"{prefix}[{key}.{k}]")
-                            for k2, v2 in v.items():
-                                lines.append(f"{prefix}{k2} = {serialize_value(v2)}")
-                        elif isinstance(v, dict):
-                            inner = ", ".join(
-                                f"{k2} = {serialize_value(v2)}" for k2, v2 in v.items()
-                            )
-                            lines.append(f"{prefix}{k} = {{ {inner} }}")
-                        else:
-                            lines.append(f"{prefix}{k} = {serialize_value(v)}")
-                    lines.append("")
+    # Append dev-dependencies that the fork adds but upstream doesn't have
+    dev_deps = cargo_cfg.get("dev-dependencies", [])
+    if dev_deps:
+        content = content.rstrip()
+        content += "\n\n[dev-dependencies]\n"
+        for dep in dev_deps:
+            name = dep["name"]
+            version = dep["version"]
+            extras = []
+            if dep.get("default-features") is False:
+                extras.append("default-features = false")
+            if dep.get("features"):
+                feats = ", ".join(f'"{f}"' for f in dep["features"])
+                extras.append(f"features = [{feats}]")
+            if extras:
+                content += f'{name} = {{ version = "{version}", {" ".join(extras)} }}\n'
             else:
-                lines.append(f"{prefix}{key} = {serialize_value(value)}")
+                content += f'{name} = "{version}"\n'
 
-    # [package]
-    pkg = data.get("package", {})
-    lines.append("[package]")
-    for k, v in pkg.items():
-        if isinstance(v, list):
-            lines.append(f"{k} = {serialize_value(v)}")
-        else:
-            lines.append(f"{k} = {serialize_value(v)}")
-    lines.append("")
-
-    # [dependencies]
-    deps = data.get("dependencies", {})
-    if deps:
-        lines.append("[dependencies]")
-        for k, v in deps.items():
-            if isinstance(v, dict):
-                inner = ", ".join(
-                    f"{dk} = {serialize_value(dv)}" for dk, dv in v.items()
-                )
-                lines.append(f"{k} = {{ {inner} }}")
-            else:
-                lines.append(f"{k} = {serialize_value(v)}")
-        lines.append("")
-
-    # [dev-dependencies]
-    devdeps = data.get("dev-dependencies", {})
-    if devdeps:
-        lines.append("[dev-dependencies]")
-        for k, v in devdeps.items():
-            if isinstance(v, dict):
-                inner = ", ".join(
-                    f"{dk} = {serialize_value(dv)}" for dk, dv in v.items()
-                )
-                lines.append(f"{k} = {{ {inner} }}")
-            else:
-                lines.append(f"{k} = {serialize_value(v)}")
-        lines.append("")
-
-    # [target.*] sections
-    for target_key, target_data in data.get("target", {}).items():
-        if not isinstance(target_data, dict):
-            continue
-        for section, section_data in target_data.items():
-            if not isinstance(section_data, dict):
-                continue
-            lines.append(f"[target.'{target_key}'.{section}]")
-            for k, v in section_data.items():
-                if isinstance(v, dict):
-                    inner = ", ".join(
-                        f"{dk} = {serialize_value(dv)}" for dk, dv in v.items()
-                    )
-                    lines.append(f"{k} = {{ {inner} }}")
-                else:
-                    lines.append(f"{k} = {serialize_value(v)}")
-            lines.append("")
-
-    # [features]
-    features = data.get("features", {})
-    if features:
-        lines.append("[features]")
-        for k, v in features.items():
-            lines.append(f"{k} = {serialize_value(v)}")
-        lines.append("")
-
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
+    fork_toml.write_text(content)
+    print(f"  Resolved Cargo.toml")
 
 
 def main():
     config = load_config()
     print("=== Syncing src/ files ===")
-    copied = sync_src_files(config)
-    print(f"  Copied {len(copied)} files from upstream")
+    copied, preserved, new_files = sync_src_files(config)
+    print(
+        f"  Copied {copied} from upstream, preserved {preserved} modified, {new_files} fork-only"
+    )
     print("\n=== Resolving Cargo.toml ===")
     sync_cargo_toml(config)
     print("  Done")
