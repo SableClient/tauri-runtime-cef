@@ -66,18 +66,24 @@ jobs:
         if: steps.changes.outputs.has_changes == 'true'
         run: |
           BRANCH="sync/upstream-$(date +%Y%m%d)"
-          git checkout -b "$BRANCH"
+          git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
           git add -A
           git commit -m "chore: sync from tauri-apps/tauri feat/cef"
           git push --force origin "$BRANCH"
-          gh pr create --base main --head "$BRANCH" \
-            --title "chore: sync tauri-runtime-cef from upstream feat/cef" \
-            --body "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`feat/cef\` branch.
+          # Reuse existing PR if one is already open for this branch
+          EXISTING=$(gh pr list --head "$BRANCH" --base main --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "PR #$EXISTING already exists, updated branch"
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore: sync tauri-runtime-cef from upstream feat/cef" \
+              --body "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`feat/cef\` branch.
 
           Overlay modules preserved: \`config.rs\`, \`policy.rs\`, \`streaming.rs\`, \`compat.rs\`.
 
           If this PR has merge conflicts, the upstream changed \`runtime.rs\` or \`webview.rs\` in a way that requires manual porting of the overlay modules. Fix conflicts and merge.
 
           **CEF version:** check the \`cef\` pin in Cargo.toml — bump Sable's \`src-tauri/Cargo.toml\` to match."
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
