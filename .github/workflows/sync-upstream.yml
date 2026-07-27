@@ -69,7 +69,7 @@ jobs:
           git checkout -b "$BRANCH"
           git add -A
           git commit -m "chore: sync from tauri-apps/tauri feat/cef"
-          git push origin "$BRANCH"
+          git push --force origin "$BRANCH"
           gh pr create --base main --head "$BRANCH" \
             --title "chore: sync tauri-runtime-cef from upstream feat/cef" \
             --body "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`feat/cef\` branch.
