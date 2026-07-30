@@ -9,8 +9,8 @@ use tauri_runtime::{UserEvent, window::WindowId};
 use winit::event_loop::EventLoopProxy as WinitEventLoopProxy;
 
 use crate::{
-    cef_impl::{ipc, request_handler},
-    runtime::{Message, RuntimeContext},
+  cef_impl::{ipc, request_handler},
+  runtime::{CefRuntime, Message, RuntimeContext},
 };
 
 mod context_menu;
@@ -28,8 +28,8 @@ use display::TauriCefDisplayHandler;
 use download::TauriCefDownloadHandler;
 use drag::TauriCefDragHandler;
 pub(crate) use drag::{
-    DragDropEventTarget, DragDropScriptEvent, DragDropState, WebDragDropResourceRequestHandler,
-    drag_drop_initialization_script, event_from_script_event,
+  DragDropEventTarget, DragDropScriptEvent, DragDropState, WebDragDropResourceRequestHandler,
+  drag_drop_initialization_script, event_from_script_event,
 };
 use keyboard::TauriCefKeyboardHandler;
 use life_span::TauriCefChildLifeSpanHandler;
@@ -38,32 +38,31 @@ use permission::TauriCefPermissionHandler;
 pub(crate) use process::TauriCefBrowserProcessHandler;
 
 pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
-    pub(crate) ipc_handler: Option<Arc<ipc::IpcHandler<T>>>,
-    pub(crate) on_page_load_handler: Option<Arc<crate::compat::OnPageLoadHandler>>,
-    pub(crate) document_title_changed_handler:
-        Option<Arc<crate::compat::DocumentTitleChangedHandler>>,
-    pub(crate) navigation_handler: Option<Arc<crate::compat::NavigationHandler>>,
-    pub(crate) address_changed_handler: Option<Arc<crate::compat::AddressChangedHandler>>,
-    pub(crate) new_window_handler: Option<Arc<crate::compat::NewWindowHandler>>,
-    pub(crate) download_handler: Option<Arc<crate::compat::DownloadHandler>>,
-    pub(crate) web_content_process_terminate_handler: Option<Arc<dyn Fn() + Send>>,
+  pub(crate) ipc_handler: Option<Arc<ipc::IpcHandler<T>>>,
+  pub(crate) on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
+  pub(crate) document_title_changed_handler:
+    Option<Arc<tauri_runtime::webview::DocumentTitleChangedHandler>>,
+  pub(crate) navigation_handler: Option<Arc<tauri_runtime::webview::NavigationHandler>>,
+  pub(crate) address_changed_handler: Option<Arc<tauri_runtime::webview::AddressChangedHandler>>,
+  pub(crate) new_window_handler:
+    Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
+  pub(crate) download_handler: Option<Arc<tauri_runtime::webview::DownloadHandler>>,
+  pub(crate) web_content_process_terminate_handler: Option<Arc<dyn Fn() + Send>>,
 }
 
 impl<T: UserEvent> Clone for TauriCefBrowserClientHandlers<T> {
-    fn clone(&self) -> Self {
-        Self {
-            ipc_handler: self.ipc_handler.clone(),
-            on_page_load_handler: self.on_page_load_handler.clone(),
-            document_title_changed_handler: self.document_title_changed_handler.clone(),
-            navigation_handler: self.navigation_handler.clone(),
-            address_changed_handler: self.address_changed_handler.clone(),
-            new_window_handler: self.new_window_handler.clone(),
-            download_handler: self.download_handler.clone(),
-            web_content_process_terminate_handler: self
-                .web_content_process_terminate_handler
-                .clone(),
-        }
+  fn clone(&self) -> Self {
+    Self {
+      ipc_handler: self.ipc_handler.clone(),
+      on_page_load_handler: self.on_page_load_handler.clone(),
+      document_title_changed_handler: self.document_title_changed_handler.clone(),
+      navigation_handler: self.navigation_handler.clone(),
+      address_changed_handler: self.address_changed_handler.clone(),
+      new_window_handler: self.new_window_handler.clone(),
+      download_handler: self.download_handler.clone(),
+      web_content_process_terminate_handler: self.web_content_process_terminate_handler.clone(),
     }
+  }
 }
 
 wrap_client! {
@@ -108,7 +107,6 @@ wrap_client! {
         self.proxy.clone(),
         self.window_id,
         self.webview_id,
-        self.label.clone(),
         self.context.clone(),
         self.handlers.new_window_handler.clone(),
         self.initial_url.clone(),
@@ -145,7 +143,7 @@ wrap_client! {
     }
 
     fn permission_handler(&self) -> Option<PermissionHandler> {
-      Some(TauriCefPermissionHandler::new(self.label.clone()))
+      Some(TauriCefPermissionHandler::new())
     }
 
     fn on_process_message_received(
