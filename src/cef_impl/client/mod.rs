@@ -17,7 +17,7 @@ mod context_menu;
 mod display;
 mod download;
 mod drag;
-mod keyboard;
+pub(crate) mod keyboard;
 mod life_span;
 mod load;
 mod permission;

@@ -4,6 +4,17 @@
 
 use cef::*;
 
+/// Key handler: return 1 to consume the event, 0 to let it pass through.
+type KeyHandler = dyn Fn(&KeyEvent) -> ::std::os::raw::c_int + Send + Sync;
+
+static KEY_HANDLER: std::sync::OnceLock<Box<KeyHandler>> = std::sync::OnceLock::new();
+
+pub fn set_key_handler(
+    handler: impl Fn(&KeyEvent) -> ::std::os::raw::c_int + Send + Sync + 'static,
+) {
+    let _ = KEY_HANDLER.set(Box::new(handler));
+}
+
 #[cfg(target_os = "linux")]
 type CefOsEvent<'a> = Option<&'a mut cef::sys::XEvent>;
 #[cfg(target_os = "macos")]
@@ -24,19 +35,18 @@ wrap_keyboard_handler! {
       _os_event: CefOsEvent<'_>,
       _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
     ) -> ::std::os::raw::c_int {
+      let Some(event) = event else {
+        return 0;
+      };
+
+      use cef::sys::cef_key_event_type_t;
+      let keydown_type: cef::KeyEventType = cef_key_event_type_t::KEYEVENT_RAWKEYDOWN.into();
+      if event.type_ != keydown_type {
+        return 0;
+      }
+
       // If devtools is disabled, block devtools keyboard shortcuts.
       if !self.devtools_enabled {
-        let Some(event) = event else {
-          return 0;
-        };
-
-        // Check if this is a keydown event.
-        use cef::sys::cef_key_event_type_t;
-        let keydown_type: cef::KeyEventType = cef_key_event_type_t::KEYEVENT_RAWKEYDOWN.into();
-        if event.type_ != keydown_type {
-          return 0;
-        }
-
         // Get modifier keys.
         use cef::sys::cef_event_flags_t;
         #[cfg(windows)]
@@ -80,6 +90,13 @@ wrap_keyboard_handler! {
             return 1;
           }
         }
+      }
+
+      // does the handler want to consume a keypress?
+      if let Some(handler) = KEY_HANDLER.get()
+        && handler(event) == 1
+      {
+        return 1;
       }
 
       0

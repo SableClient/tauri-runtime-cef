@@ -18,6 +18,7 @@ mod window;
 mod window_builder;
 mod window_handle;
 
+pub use cef_impl::client::keyboard::set_key_handler;
 pub use config::{CefConfig, configure};
 pub use policy::{
     DEFAULT_PROMPT_TIMEOUT, DeferredResponder, DenyReason, NormalizedOrigin, PermissionAudit,
