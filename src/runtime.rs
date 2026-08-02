@@ -1482,6 +1482,18 @@ impl<T: UserEvent> CefRuntime<T> {
     ))]
     pre_cef_signals.restore();
 
+    // Baseline for embedders that never touch GTK. One that calls `gtk_init`
+    // must call `install_x_error_handlers` again afterwards — GTK's X11 backend
+    // replaces the handler during init.
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "openbsd",
+      target_os = "netbsd"
+    ))]
+    crate::platform::linux::install_x_error_handlers();
+
     #[cfg(target_os = "macos")]
     let app_delegate = if !is_helper {
       use crate::platform::macos::AppDelegateEvent;

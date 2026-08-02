@@ -19,6 +19,14 @@ mod window_builder;
 mod window_handle;
 
 pub use config::{CefConfig, configure};
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+pub use platform::linux::install_x_error_handlers;
 pub use policy::{
   DEFAULT_PROMPT_TIMEOUT, DeferredResponder, DenyReason, NormalizedOrigin, PermissionAudit,
   PermissionKind, PermissionRequest, PermissionResponder, PopupRequest, RequestSource, Verdict,

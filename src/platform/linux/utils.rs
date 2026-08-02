@@ -5,7 +5,7 @@
 use std::{
   cell::RefCell,
   ffi::CString,
-  os::raw::{c_long, c_ulong},
+  os::raw::{c_int, c_long, c_ulong},
   sync::LazyLock,
 };
 use x11_dl::xlib;
@@ -65,6 +65,57 @@ pub(super) fn with_x11<R>(default: R, f: impl FnOnce(&xlib::Xlib, *mut xlib::Dis
     }
     result
   })
+}
+
+unsafe extern "C" fn x_error_handler(
+  _display: *mut xlib::Display,
+  event: *mut xlib::XErrorEvent,
+) -> c_int {
+  if !event.is_null() {
+    let event = unsafe { &*event };
+    log::warn!(
+      "X error received: type {}, serial {}, error_code {}, request_code {}, minor_code {}",
+      event.type_,
+      event.serial,
+      event.error_code,
+      event.request_code,
+      event.minor_code
+    );
+  }
+  0
+}
+
+unsafe extern "C" fn x_io_error_handler(_display: *mut xlib::Display) -> c_int {
+  log::error!("X IO error received: the display connection is gone");
+  0
+}
+
+/// Replace Xlib's process-killing default error handlers with logging no-ops.
+///
+/// Xlib terminates the process on error by default: the stock error handler
+/// prints and calls `exit(1)`, and the IO-error handler exits when the display
+/// connection breaks. A non-fatal X protocol error — the kind a compositor or a
+/// GPU reset produces on display resume — therefore takes the whole app down
+/// with no Rust panic and no backtrace.
+///
+/// Mirrors cefclient's `XErrorHandlerImpl`/`XIOErrorHandlerImpl`, installed
+/// there for the same reason:
+/// <https://github.com/chromiumembedded/cef/blob/master/tests/cefclient/cefclient_gtk.cc>
+///
+/// The runtime installs these itself after `cef::initialize`. **An embedder
+/// that calls `gtk_init` must call this again afterwards**: GTK's X11 backend
+/// installs its own handler during init, replacing whatever was there. This is
+/// why cefclient installs its handlers *after* `gtk_init` rather than before.
+/// Calling this more than once is harmless.
+pub fn install_x_error_handlers() {
+  let Some(xlib) = XLIB.as_ref() else {
+    return;
+  };
+
+  unsafe {
+    (xlib.XSetErrorHandler)(Some(x_error_handler));
+    (xlib.XSetIOErrorHandler)(Some(x_io_error_handler));
+  }
 }
 
 pub(super) fn atom(xlib: &xlib::Xlib, display: *mut xlib::Display, name: &str) -> c_ulong {
