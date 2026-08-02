@@ -20,13 +20,13 @@ mod window_handle;
 
 pub use config::{CefConfig, configure};
 pub use policy::{
-    DEFAULT_PROMPT_TIMEOUT, DeferredResponder, DenyReason, NormalizedOrigin, PermissionAudit,
-    PermissionKind, PermissionRequest, PermissionResponder, PopupRequest, RequestSource, Verdict,
-    set_permission_audit, set_permission_policy, set_popup_policy,
+  DEFAULT_PROMPT_TIMEOUT, DeferredResponder, DenyReason, NormalizedOrigin, PermissionAudit,
+  PermissionKind, PermissionRequest, PermissionResponder, PopupRequest, RequestSource, Verdict,
+  set_permission_audit, set_permission_policy, set_popup_policy,
 };
 pub use runtime::*;
 pub use streaming::{
-    InitiatorOrigin, StreamClosed, StreamResponder, StreamWriter, register_streaming_scheme_handler,
+  InitiatorOrigin, StreamClosed, StreamResponder, StreamWriter, register_streaming_scheme_handler,
 };
 pub use webview::*;
 pub use window::CefWindowDispatcher;

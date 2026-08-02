@@ -36,66 +36,66 @@ self.addEventListener('activate', (e) => e.waitUntil(clients.claim()));
 self.addEventListener('fetch', () => {});"#;
 
 fn main() {
-    tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {
-        identifier: "cef-sw-probe".into(),
-        // On a headless box (Xvfb, no GPU, possibly no unprivileged-userns) the
-        // CEF sandbox zygote and/or GPU process can fail to launch. If this
-        // example traps at boot, build it `--no-default-features` (drops the
-        // `sandbox` feature so `no_sandbox` is honored) and add the switches
-        // `--no-sandbox --disable-gpu --in-process-gpu` here. That combination is
-        // box-dependent and flaky; a real desktop keeps the sandbox default and
-        // needs none of them.
-        command_line_args: vec![
-            ("--use-mock-keychain".into(), None),
-            ("password-store".into(), Some("basic".into())),
-        ],
-        custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into(), "probe".into()],
-        cookieable_schemes: vec!["probe".into()],
-        ..Default::default()
-    });
+  tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {
+    identifier: "cef-sw-probe".into(),
+    // On a headless box (Xvfb, no GPU, possibly no unprivileged-userns) the
+    // CEF sandbox zygote and/or GPU process can fail to launch. If this
+    // example traps at boot, build it `--no-default-features` (drops the
+    // `sandbox` feature so `no_sandbox` is honored) and add the switches
+    // `--no-sandbox --disable-gpu --in-process-gpu` here. That combination is
+    // box-dependent and flaky; a real desktop keeps the sandbox default and
+    // needs none of them.
+    command_line_args: vec![
+      ("--use-mock-keychain".into(), None),
+      ("password-store".into(), Some("basic".into())),
+    ],
+    custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into(), "probe".into()],
+    cookieable_schemes: vec!["probe".into()],
+    ..Default::default()
+  });
 
-    if std::env::args().any(|arg| arg.starts_with("--type=")) {
-        tauri_runtime_cef::run_cef_helper_process();
-        return;
-    }
+  if std::env::args().any(|arg| arg.starts_with("--type=")) {
+    tauri_runtime_cef::run_cef_helper_process();
+    return;
+  }
 
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-        println!("PROBE-RESULT {{\"timeout\":true}}");
-        std::process::exit(2);
-    });
+  std::thread::spawn(|| {
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    println!("PROBE-RESULT {{\"timeout\":true}}");
+    std::process::exit(2);
+  });
 
-    type Rt = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
-    tauri::Builder::<Rt>::new()
-        .register_uri_scheme_protocol("probe", |_ctx, request| {
-            let respond = |mime: &str, body: &'static str| {
-                tauri::http::Response::builder()
-                    .header("content-type", mime)
-                    .body(Cow::Borrowed(body.as_bytes()))
-                    .unwrap()
-            };
-            match request.uri().path() {
-                "/" => respond("text/html", PAGE),
-                "/sw.js" => respond("text/javascript", SW),
-                "/report" => {
-                    println!("PROBE-RESULT {}", String::from_utf8_lossy(request.body()));
-                    std::process::exit(0);
-                }
-                _ => tauri::http::Response::builder()
-                    .status(404)
-                    .body(Cow::Borrowed(&b""[..]))
-                    .unwrap(),
-            }
-        })
-        .setup(|app| {
-            tauri::WebviewWindowBuilder::new(
-                app,
-                "probe",
-                tauri::WebviewUrl::External("probe://app/".parse().unwrap()),
-            )
-            .build()?;
-            Ok(())
-        })
-        .run(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("probe app run");
+  type Rt = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
+  tauri::Builder::<Rt>::new()
+    .register_uri_scheme_protocol("probe", |_ctx, request| {
+      let respond = |mime: &str, body: &'static str| {
+        tauri::http::Response::builder()
+          .header("content-type", mime)
+          .body(Cow::Borrowed(body.as_bytes()))
+          .unwrap()
+      };
+      match request.uri().path() {
+        "/" => respond("text/html", PAGE),
+        "/sw.js" => respond("text/javascript", SW),
+        "/report" => {
+          println!("PROBE-RESULT {}", String::from_utf8_lossy(request.body()));
+          std::process::exit(0);
+        }
+        _ => tauri::http::Response::builder()
+          .status(404)
+          .body(Cow::Borrowed(&b""[..]))
+          .unwrap(),
+      }
+    })
+    .setup(|app| {
+      tauri::WebviewWindowBuilder::new(
+        app,
+        "probe",
+        tauri::WebviewUrl::External("probe://app/".parse().unwrap()),
+      )
+      .build()?;
+      Ok(())
+    })
+    .run(tauri::test::mock_context(tauri::test::noop_assets()))
+    .expect("probe app run");
 }

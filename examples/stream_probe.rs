@@ -51,88 +51,88 @@ const PAGE: &str = r#"<!doctype html><title>stream probe</title><script>
 </script>"#;
 
 fn main() {
-    tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {
-        identifier: "cef-stream-probe".into(),
-        command_line_args: vec![
-            ("--use-mock-keychain".into(), None),
-            ("password-store".into(), Some("basic".into())),
-        ],
-        custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into(), "probe".into()],
-        cookieable_schemes: vec!["probe".into()],
-        ..Default::default()
-    });
+  tauri_runtime_cef::configure(tauri_runtime_cef::CefConfig {
+    identifier: "cef-stream-probe".into(),
+    command_line_args: vec![
+      ("--use-mock-keychain".into(), None),
+      ("password-store".into(), Some("basic".into())),
+    ],
+    custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into(), "probe".into()],
+    cookieable_schemes: vec!["probe".into()],
+    ..Default::default()
+  });
 
-    if std::env::args().any(|arg| arg.starts_with("--type=")) {
-        tauri_runtime_cef::run_cef_helper_process();
-        return;
-    }
+  if std::env::args().any(|arg| arg.starts_with("--type=")) {
+    tauri_runtime_cef::run_cef_helper_process();
+    return;
+  }
 
-    std::thread::spawn(|| {
-        std::thread::sleep(Duration::from_secs(60));
-        println!("PROBE-RESULT {{\"timeout\":true}}");
-        std::process::exit(2);
-    });
+  std::thread::spawn(|| {
+    std::thread::sleep(Duration::from_secs(60));
+    println!("PROBE-RESULT {{\"timeout\":true}}");
+    std::process::exit(2);
+  });
 
-    // The streaming handler owns every probe:// request (process_request consults
-    // the streaming registry before the buffered path). The buffered registration
-    // below still has to exist so the runtime installs the scheme factory +
-    // per-webview registry entry; its handler is never actually called.
-    tauri_runtime_cef::register_streaming_scheme_handler(
+  // The streaming handler owns every probe:// request (process_request consults
+  // the streaming registry before the buffered path). The buffered registration
+  // below still has to exist so the runtime installs the scheme factory +
+  // per-webview registry entry; its handler is never actually called.
+  tauri_runtime_cef::register_streaming_scheme_handler(
+    "probe",
+    Box::new(|_label, request, responder| match request.uri().path() {
+      "/" => {
+        let head = http::Response::builder()
+          .header("content-type", "text/html")
+          .body(())
+          .unwrap();
+        let mut writer = responder.respond(head);
+        let _ = writer.write(PAGE.as_bytes().to_vec());
+      }
+      "/sse" => {
+        let head = http::Response::builder()
+          .header("content-type", "text/event-stream")
+          .header("cache-control", "no-cache")
+          .body(())
+          .unwrap();
+        let mut writer = responder.respond(head);
+        for i in 0..12 {
+          if writer.write(format!("data: {i}\n\n").into_bytes()).is_err() {
+            break; // renderer cancelled — the page got its ticks and closed.
+          }
+          std::thread::sleep(Duration::from_millis(150));
+        }
+      }
+      "/report" => {
+        println!("PROBE-RESULT {}", String::from_utf8_lossy(request.body()));
+        std::process::exit(0);
+      }
+      _ => {
+        let head = http::Response::builder().status(404).body(()).unwrap();
+        responder.respond(head);
+      }
+    }),
+  );
+
+  type Rt = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
+  tauri::Builder::<Rt>::new()
+    .register_uri_scheme_protocol("probe", |_ctx, _request| {
+      // Unreachable: the streaming handler owns every probe:// request.
+      tauri::http::Response::builder()
+        .status(500)
+        .body(Cow::Borrowed(
+          &b"buffered probe handler should be unreachable"[..],
+        ))
+        .unwrap()
+    })
+    .setup(|app| {
+      tauri::WebviewWindowBuilder::new(
+        app,
         "probe",
-        Box::new(|_label, request, responder| match request.uri().path() {
-            "/" => {
-                let head = http::Response::builder()
-                    .header("content-type", "text/html")
-                    .body(())
-                    .unwrap();
-                let mut writer = responder.respond(head);
-                let _ = writer.write(PAGE.as_bytes().to_vec());
-            }
-            "/sse" => {
-                let head = http::Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .header("cache-control", "no-cache")
-                    .body(())
-                    .unwrap();
-                let mut writer = responder.respond(head);
-                for i in 0..12 {
-                    if writer.write(format!("data: {i}\n\n").into_bytes()).is_err() {
-                        break; // renderer cancelled — the page got its ticks and closed.
-                    }
-                    std::thread::sleep(Duration::from_millis(150));
-                }
-            }
-            "/report" => {
-                println!("PROBE-RESULT {}", String::from_utf8_lossy(request.body()));
-                std::process::exit(0);
-            }
-            _ => {
-                let head = http::Response::builder().status(404).body(()).unwrap();
-                responder.respond(head);
-            }
-        }),
-    );
-
-    type Rt = tauri_runtime_cef::CefRuntime<tauri::EventLoopMessage>;
-    tauri::Builder::<Rt>::new()
-        .register_uri_scheme_protocol("probe", |_ctx, _request| {
-            // Unreachable: the streaming handler owns every probe:// request.
-            tauri::http::Response::builder()
-                .status(500)
-                .body(Cow::Borrowed(
-                    &b"buffered probe handler should be unreachable"[..],
-                ))
-                .unwrap()
-        })
-        .setup(|app| {
-            tauri::WebviewWindowBuilder::new(
-                app,
-                "probe",
-                tauri::WebviewUrl::External("probe://app/".parse().unwrap()),
-            )
-            .build()?;
-            Ok(())
-        })
-        .run(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("probe app run");
+        tauri::WebviewUrl::External("probe://app/".parse().unwrap()),
+      )
+      .build()?;
+      Ok(())
+    })
+    .run(tauri::test::mock_context(tauri::test::noop_assets()))
+    .expect("probe app run");
 }
