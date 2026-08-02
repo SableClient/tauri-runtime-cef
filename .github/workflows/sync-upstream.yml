@@ -47,6 +47,7 @@ jobs:
         env:
           UPSTREAM_DIR: /tmp/upstream/crates/tauri-runtime-cef
           FORK_ROOT: .
+          SYNC_REPORT: /tmp/sync-report.md
 
       - name: Check for changes
         id: changes
@@ -67,21 +68,30 @@ jobs:
           git add -A
           git commit -m "chore: sync from tauri-apps/tauri ${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
           git push --force origin "$BRANCH"
+          UPSTREAM_BRANCH="${{ github.event.inputs.upstream-branch || 'feat/cef' }}"
+          {
+            echo "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`$UPSTREAM_BRANCH\` branch."
+            echo
+            echo "If this PR has merge conflicts, the upstream changed \`runtime.rs\` or \`webview.rs\` in a way that requires manual porting of the overlay modules. Fix conflicts and merge."
+            echo
+            echo "**Before merging, read the divergence report below.** Re-applying fork patches by hand is how upstream fixes get dropped silently — the report is the only place they surface, because the copy overwrites the evidence."
+            echo
+            echo "**CEF version:** check the \`cef\` pin in Cargo.toml, bump Sable's \`src-tauri/Cargo.toml\` to match."
+            echo
+            echo "**Note:** if syncing from \`amr/cef-gtk4\`, the Cargo.toml will reference \`gtk4\` and \`winit-gtk4\`, the fork's overlay config may need updating to handle the \`gtk4\` crate name and the winit git dep."
+            echo
+            echo "---"
+            echo
+            cat /tmp/sync-report.md
+          } > /tmp/pr-body.md
           EXISTING=$(gh pr list --head "$BRANCH" --base main --json number -q '.[0].number' 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
-            echo "PR #$EXISTING already exists, updated branch"
+            gh pr edit "$EXISTING" --body-file /tmp/pr-body.md
+            echo "PR #$EXISTING already exists, updated branch and report"
           else
             gh pr create --base main --head "$BRANCH" \
-              --title "chore: sync tauri-runtime-cef from upstream ${{ github.event.inputs.upstream-branch || 'feat/cef' }}" \
-              --body "Automated sync from [tauri-apps/tauri](https://github.com/tauri-apps/tauri) \`${{ github.event.inputs.upstream-branch || 'feat/cef' }}\` branch.
-
-          Fork-only files preserved: \`config.rs\`, \`policy.rs\`, \`streaming.rs\`, \`compat.rs\`.
-
-          If this PR has merge conflicts, the upstream changed \`runtime.rs\` or \`webview.rs\` in a way that requires manual porting of the overlay modules. Fix conflicts and merge.
-
-          **CEF version:** check the \`cef\` pin in Cargo.toml, bump Sable's \`src-tauri/Cargo.toml\` to match.
-
-          **Note:** if syncing from \`amr/cef-gtk4\`, the Cargo.toml will reference \`gtk4\` and \`winit-gtk4\`, the fork's overlay config may need updating to handle the \`gtk4\` crate name and the winit git dep."
+              --title "chore: sync tauri-runtime-cef from upstream $UPSTREAM_BRANCH" \
+              --body-file /tmp/pr-body.md
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
