@@ -8,5 +8,3 @@ mod taskbar;
 mod utils;
 mod webview;
 mod window;
-
-pub use utils::install_x_error_handlers;

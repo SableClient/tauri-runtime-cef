@@ -13,16 +13,18 @@ use std::sync::{
 use cef::*;
 use sha2::{Digest, Sha256};
 use tauri_runtime::{
-  Cookie, Error, Result, UserEvent, WebviewDispatch, WebviewEventId,
+  Cookie, Error, Result, Runtime, UserEvent, WebviewDispatch, WebviewEventId,
   dpi::{PhysicalPosition, PhysicalSize, Position, Rect, Size},
-  webview::{DetachedWebview, InitializationScript, PendingWebview, WebviewAttributes},
+  webview::{
+    DetachedWebview, InitializationScript, PendingWebview, UriSchemeProtocolHandler,
+    WebviewAttributes,
+  },
   window::{WebviewEvent, WindowId},
 };
 use tauri_utils::{Theme, config::Color, html::normalize_script_for_csp};
 use url::Url;
 
 use crate::cef_impl::{client as browser_client, cookie, request_context, request_handler};
-use crate::compat::{self, UriSchemeProtocolHandler};
 use crate::runtime::{CefRuntime, Message, RuntimeContext, WinitCefApp};
 use crate::window::AppWindow;
 
@@ -302,6 +304,13 @@ impl<T: UserEvent> WinitCefApp<T> {
       ));
     };
 
+    // On Windows a window's webviews are sibling child HWNDs. Put each new one
+    // on top of the ones already there — the order they were created in — and
+    // pin it, so Chromium's focus raise cannot reshuffle them behind our back
+    // and bury an overlay webview under the one that fills the window.
+    #[cfg(windows)]
+    child.raise_to_top();
+
     *live_browsers += 1;
     appwindow.children.push(child);
     layout_app_window(appwindow);
@@ -337,9 +346,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     let on_page_load_handler = pending.on_page_load_handler.take().map(Arc::from);
     let document_title_changed_handler =
       pending.document_title_changed_handler.take().map(Arc::from);
-    // Published PendingWebview has no address-changed channel (feat/cef-only);
-    // the client plumbing stays for when upstream ships it.
-    let address_changed_handler: Option<Arc<compat::AddressChangedHandler>> = None;
+    let address_changed_handler = pending.address_changed_handler.take().map(Arc::from);
     let devtools_enabled = (cfg!(debug_assertions) || cfg!(feature = "devtools"))
       && pending.webview_attributes.devtools.unwrap_or(true);
     let drag_drop_handler_enabled = pending.webview_attributes.drag_drop_handler_enabled;
@@ -384,9 +391,9 @@ impl<T: UserEvent> WinitCefApp<T> {
       size: parent_size.into(),
     });
     #[cfg(not(target_os = "macos"))]
-    let bounds = compat::rect_to_physical::<i32, i32>(bounds, scale);
+    let bounds = bounds.to_physical::<i32, i32>(scale);
     #[cfg(target_os = "macos")]
-    let bounds = compat::rect_to_logical::<i32, i32>(bounds, scale);
+    let bounds = bounds.to_logical::<i32, i32>(scale);
     let bounds = cef::Rect {
       x: bounds.position.x,
       y: bounds.position.y,
@@ -394,9 +401,18 @@ impl<T: UserEvent> WinitCefApp<T> {
       height: bounds.size.height,
     };
 
-    // Published PendingWebview has no per-webview platform attribute channel
-    // (feat/cef-only), so the runtime style is always CEF's default.
-    let cef_runtime_style = cef::RuntimeStyle::DEFAULT;
+    // Let CEF pick the runtime style unless overridden per-webview.
+    let cef_runtime_style = pending
+      .platform_specific_attributes
+      .iter()
+      .map(|attr| match attr {
+        WebviewAtribute::RuntimeStyle { style } => match style {
+          RuntimeStyle::Alloy => cef::RuntimeStyle::ALLOY,
+          RuntimeStyle::Chrome => cef::RuntimeStyle::CHROME,
+        },
+      })
+      .next()
+      .unwrap_or(cef::RuntimeStyle::DEFAULT);
 
     let mut window_info = cef::WindowInfo::default().set_as_child(parent, &bounds);
     window_info.runtime_style = cef_runtime_style;
@@ -586,19 +602,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WebviewMessage::CanGoBack(tx) => _ = tx.send(Ok(child.browser.can_go_back() == 1)),
       WebviewMessage::GoForward => child.browser.go_forward(),
       WebviewMessage::CanGoForward(tx) => _ = tx.send(Ok(child.browser.can_go_forward() == 1)),
-      // Tauri's Webview::close() is an unconditional native lifecycle action,
-      // not a page-requested window.close(). A non-forced CEF close may leave
-      // the child browser (and publisher code) alive indefinitely, and its late
-      // callback can race parent-window bookkeeping. Window/app teardown already
-      // uses force_close=true; standalone child close needs the same semantics.
-      WebviewMessage::Close => {
-        child.host.close_browser(1);
-        // Windowed CEF browsers are not destroyed by CloseBrowser alone: the
-        // native child hierarchy must also be torn down before OnBeforeClose
-        // runs. Leaving it attached leaks the renderer; letting CEF forward a
-        // close to its top-level parent can close the whole Tauri window.
-        child.destroy_native();
-      }
+      WebviewMessage::Close => child.host.close_browser(0),
       WebviewMessage::SetBounds(bounds) => {
         let parent_size = appwindow.window.surface_size();
         let scale = appwindow.window.scale_factor();
@@ -751,6 +755,11 @@ impl<T: UserEvent> WinitCefApp<T> {
           target_appwindow.window.scale_factor(),
           bounds,
         );
+        // Re-parenting does not preserve z-order: a view docked back into a
+        // window that already owns a full-window main webview must be put back
+        // on top, or it lands behind it and renders nothing.
+        #[cfg(windows)]
+        child.raise_to_top();
 
         target_appwindow.children.push(child);
         let _ = tx.send(Ok(()));
@@ -799,6 +808,20 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 }
+
+#[derive(Clone, Copy, Debug)]
+pub enum RuntimeStyle {
+  Alloy,
+  Chrome,
+}
+
+#[derive(Debug)]
+pub enum WebviewAtribute {
+  RuntimeStyle { style: RuntimeStyle },
+}
+
+unsafe impl Send for WebviewAtribute {}
+unsafe impl Sync for WebviewAtribute {}
 
 #[derive(Debug, Clone)]
 pub struct CefInitScript {
@@ -930,34 +953,6 @@ macro_rules! webview_getter {
   }};
 }
 
-impl<T: UserEvent> CefWebviewDispatcher<T> {
-  // History navigation: feat/cef trait methods, not yet part of the published
-  // `WebviewDispatch` trait — kept as inherent API until upstream releases.
-  pub fn go_back(&self) -> Result<()> {
-    self.context.send_message(Message::Webview {
-      window_id: *self.window_id.lock().unwrap(),
-      webview_id: self.webview_id,
-      message: WebviewMessage::GoBack,
-    })
-  }
-
-  pub fn can_go_back(&self) -> Result<bool> {
-    webview_getter!(self, CanGoBack)
-  }
-
-  pub fn go_forward(&self) -> Result<()> {
-    self.context.send_message(Message::Webview {
-      window_id: *self.window_id.lock().unwrap(),
-      webview_id: self.webview_id,
-      message: WebviewMessage::GoForward,
-    })
-  }
-
-  pub fn can_go_forward(&self) -> Result<bool> {
-    webview_getter!(self, CanGoForward)
-  }
-}
-
 impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
   type Runtime = CefRuntime<T>;
 
@@ -975,13 +970,14 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
     id
   }
 
-  fn with_webview<F: FnOnce(Box<dyn std::any::Any>) + Send + 'static>(&self, f: F) -> Result<()> {
-    // Published tauri erases the runtime webview type; downcast the boxed
-    // `Any` back to [`Webview`] to reach the underlying `cef::Browser`.
+  fn with_webview<F: FnOnce(<Self::Runtime as Runtime<T>>::Webview) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> Result<()> {
     self.context.send_message(Message::Webview {
       window_id: *self.window_id.lock().unwrap(),
       webview_id: self.webview_id,
-      message: WebviewMessage::WithWebview(Box::new(move |webview: Webview| f(Box::new(webview)))),
+      message: WebviewMessage::WithWebview(Box::new(f)),
     })
   }
 
@@ -1044,6 +1040,30 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
       webview_id: self.webview_id,
       message: WebviewMessage::Reload,
     })
+  }
+
+  fn go_back(&self) -> Result<()> {
+    self.context.send_message(Message::Webview {
+      window_id: *self.window_id.lock().unwrap(),
+      webview_id: self.webview_id,
+      message: WebviewMessage::GoBack,
+    })
+  }
+
+  fn can_go_back(&self) -> Result<bool> {
+    webview_getter!(self, CanGoBack)
+  }
+
+  fn go_forward(&self) -> Result<()> {
+    self.context.send_message(Message::Webview {
+      window_id: *self.window_id.lock().unwrap(),
+      webview_id: self.webview_id,
+      message: WebviewMessage::GoForward,
+    })
+  }
+
+  fn can_go_forward(&self) -> Result<bool> {
+    webview_getter!(self, CanGoForward)
   }
 
   fn print(&self) -> Result<()> {

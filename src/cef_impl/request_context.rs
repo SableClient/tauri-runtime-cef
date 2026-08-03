@@ -328,14 +328,6 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 
   let settings = RequestContextSettings {
     cache_path,
-    // Per-context settings do not inherit the global value, so an empty list
-    // here would silently drop custom-scheme cookie support configured
-    // through `CefConfig::cookieable_schemes`.
-    cookieable_schemes_list: crate::config::config()
-      .cookieable_schemes
-      .join(",")
-      .as_str()
-      .into(),
     ..Default::default()
   };
 
@@ -366,22 +358,9 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 
   if let Some(request_context) = request_context.as_ref() {
     for scheme in custom_schemes {
-      // Windows/Android-style form: `http(s)://<scheme>.localhost/…`.
       request_context.register_scheme_handler_factory(
         Some(&custom_protocol_scheme.into()),
         Some(&format!("{scheme}.localhost").as_str().into()),
-        Some(&mut request_handler::UriSchemeHandlerFactory::new(
-          scheme_registry.clone(),
-          scheme.clone(),
-        )),
-      );
-      // Native form published tauri emits on Linux/macOS:
-      // `<scheme>://localhost/…`. The scheme itself is made known to
-      // Chromium in `on_register_custom_schemes` (crate config list); an
-      // empty domain filter matches every host on the scheme.
-      request_context.register_scheme_handler_factory(
-        Some(&scheme.as_str().into()),
-        None,
         Some(&mut request_handler::UriSchemeHandlerFactory::new(
           scheme_registry.clone(),
           scheme.clone(),
