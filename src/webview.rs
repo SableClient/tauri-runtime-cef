@@ -193,25 +193,11 @@ pub(crate) struct AppWebview {
   pub(crate) browser_id: i32,
   pub(crate) host: cef::BrowserHost,
   pub(crate) uri_scheme_protocols: Arc<HashMap<String, Arc<Box<UriSchemeProtocolHandler>>>>,
-  pub(crate) use_https_scheme: bool,
   pub(crate) devtools_protocol_handlers: Arc<Mutex<Vec<Arc<DevToolsProtocolHandler>>>>,
   /// Keeps the DevTools message observer registered. Dropping this unregisters the observer.
   pub(crate) devtools_observer_registration: Arc<Mutex<Option<cef::Registration>>>,
   pub(crate) listeners: WebviewEventListeners,
   pub(crate) bounds_rate: Option<BoundsRate>,
-}
-
-fn https_custom_protocol_url(url: &Url, use_https_scheme: bool, is_custom_protocol: bool) -> Url {
-  if !use_https_scheme || !is_custom_protocol {
-    return url.clone();
-  }
-
-  let mut https_url = Url::parse(&format!("https://{}.localhost", url.scheme()))
-    .expect("custom protocol scheme is a valid hostname label");
-  https_url.set_path(url.path());
-  https_url.set_query(url.query());
-  https_url.set_fragment(url.fragment());
-  https_url
 }
 
 impl AppWebview {
@@ -416,22 +402,17 @@ impl<T: UserEvent> WinitCefApp<T> {
     window_info.runtime_style = cef_runtime_style;
     let settings = browser_settings_from_webview_attributes(&pending.webview_attributes);
 
-    let use_https_scheme = pending.webview_attributes.use_https_scheme;
-    let custom_protocol_scheme = if use_https_scheme { "https" } else { "http" }.to_string();
+    let custom_protocol_scheme = if pending.webview_attributes.use_https_scheme {
+      "https"
+    } else {
+      "http"
+    }
+    .to_string();
     let custom_scheme_domain_names: Vec<String> = uri_scheme_protocols
       .keys()
       .map(|scheme| format!("{scheme}.localhost"))
       .collect();
-    let real_initial_url = Url::parse(&pending.url)
-      .map(|url| {
-        https_custom_protocol_url(
-          &url,
-          use_https_scheme,
-          uri_scheme_protocols.contains_key(url.scheme()),
-        )
-        .to_string()
-      })
-      .unwrap_or_else(|_| pending.url.clone());
+    let real_initial_url = pending.url.as_str().to_string();
     let (browser_tx, browser_rx) = mpsc::channel();
     let (init_done, on_initialized) = request_context::deferred_init_continuation({
       let scheme_registry = scheme_registry.clone();
@@ -501,7 +482,6 @@ impl<T: UserEvent> WinitCefApp<T> {
             browser_id,
             host,
             uri_scheme_protocols,
-            use_https_scheme,
             devtools_protocol_handlers,
             devtools_observer_registration,
             listeners: Default::default(),
@@ -598,11 +578,6 @@ impl<T: UserEvent> WinitCefApp<T> {
       }
       WebviewMessage::Navigate(url) => {
         if let Some(frame) = child.browser.main_frame() {
-          let url = https_custom_protocol_url(
-            &url,
-            child.use_https_scheme,
-            child.uri_scheme_protocols.contains_key(url.scheme()),
-          );
           frame.load_url(Some(&cef::CefString::from(url.as_str())));
         }
       }
@@ -1600,36 +1575,5 @@ pub(crate) fn load_initial_url_after_registering_initialization_scripts(
 fn load_initial_url(browser: &Browser, initial_url: &str) {
   if let Some(frame) = browser.main_frame() {
     frame.load_url(Some(&CefString::from(initial_url)));
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::https_custom_protocol_url;
-  use url::Url;
-
-  #[test]
-  fn https_scheme_uses_the_localhost_alias_for_custom_protocols() {
-    let url = Url::parse("tauri://localhost/index.html?theme=dark").unwrap();
-
-    assert_eq!(
-      https_custom_protocol_url(&url, true, true).as_str(),
-      "https://tauri.localhost/index.html?theme=dark"
-    );
-  }
-
-  #[test]
-  fn native_url_is_preserved_without_https_or_for_external_urls() {
-    let tauri_url = Url::parse("tauri://localhost/").unwrap();
-    let external_url = Url::parse("https://example.com/").unwrap();
-
-    assert_eq!(
-      https_custom_protocol_url(&tauri_url, false, true),
-      tauri_url
-    );
-    assert_eq!(
-      https_custom_protocol_url(&external_url, true, false),
-      external_url
-    );
   }
 }
