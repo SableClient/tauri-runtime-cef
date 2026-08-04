@@ -691,6 +691,31 @@ pub(crate) fn prompt_kinds(mask: u32) -> Vec<PermissionKind> {
   kinds_from_mask(mask, &table)
 }
 
+/// CEF media-access bits → [`PermissionKind`]s. Desktop audio and video are
+/// both part of the one screen-capture permission decision.
+pub(crate) fn media_kinds(mask: u32) -> Vec<PermissionKind> {
+  use cef::sys::cef_media_access_permission_types_t as bits;
+  let table = [
+    (
+      bits::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32,
+      PermissionKind::Microphone,
+    ),
+    (
+      bits::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32,
+      PermissionKind::Camera,
+    ),
+    (
+      bits::CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE as u32,
+      PermissionKind::ScreenCapture,
+    ),
+    (
+      bits::CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE as u32,
+      PermissionKind::ScreenCapture,
+    ),
+  ];
+  kinds_from_mask(mask, &table)
+}
+
 /// Translate a bitmask, deduplicating kinds and turning every bit the table
 /// does not name into [`PermissionKind::Unknown`] — so a policy denying
 /// unknown kinds keeps denying permissions added by a future Chromium.
@@ -908,8 +933,24 @@ mod tests {
   }
 
   #[test]
-  fn prompt_masks_translate_and_unknown_bits_stay_unknown() {
+  fn permission_masks_translate_and_unknown_bits_stay_unknown() {
+    use cef::sys::cef_media_access_permission_types_t as media;
     use cef::sys::cef_permission_request_types_t as prompt;
+    assert_eq!(
+      media_kinds(
+        media::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32
+          | media::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32
+      ),
+      vec![PermissionKind::Microphone, PermissionKind::Camera]
+    );
+    assert_eq!(
+      media_kinds(
+        media::CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE as u32
+          | media::CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE as u32
+      ),
+      vec![PermissionKind::ScreenCapture]
+    );
+
     assert_eq!(
       prompt_kinds(prompt::CEF_PERMISSION_TYPE_GEOLOCATION as u32),
       vec![PermissionKind::Geolocation]

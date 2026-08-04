@@ -394,9 +394,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       height: bounds.size.height,
     };
 
-    // Published PendingWebview has no per-webview platform attribute channel
-    // (feat/cef-only), so the runtime style is always CEF's default.
-    let cef_runtime_style = cef::RuntimeStyle::DEFAULT;
+    let cef_runtime_style = cef::RuntimeStyle::ALLOY;
 
     let mut window_info = cef::WindowInfo::default().set_as_child(parent, &bounds);
     window_info.runtime_style = cef_runtime_style;

@@ -5,9 +5,7 @@
 //! Adapter from CEF's permission prompts to the runtime-neutral policy in
 //! [`crate::policy`].
 //!
-//! Media-access requests deliberately use CEF's default implementation. It
-//! records the grant for the requesting origin, allowing `enumerateDevices()`
-//! to disclose device identifiers and labels after the user grants access.
+//! Media-access requests use the same policy as Chromium permission prompts.
 
 use cef::{rc::Rc as _, *};
 
@@ -19,6 +17,39 @@ wrap_permission_handler! {
   }
 
   impl PermissionHandler {
+    fn on_request_media_access_permission(
+      &self,
+      _browser: Option<&mut Browser>,
+      frame: Option<&mut Frame>,
+      requesting_origin: Option<&CefString>,
+      requested_permissions: u32,
+      callback: Option<&mut MediaAccessCallback>,
+    ) -> ::std::os::raw::c_int {
+      use cef::sys::cef_media_access_permission_types_t as bits;
+
+      let Some(callback) = callback else {
+        return 0;
+      };
+      let callback = callback.clone();
+      let origin = requesting_origin.map(|origin| origin.to_string()).unwrap_or_default();
+      let is_main_frame = frame.map(|frame| frame.is_main() != 0);
+      policy::dispatch(
+        &self.webview_label,
+        &origin,
+        RequestSource::MediaAccess,
+        policy::media_kinds(requested_permissions),
+        is_main_frame,
+        move |granted| {
+          callback.cont(if granted {
+            requested_permissions
+          } else {
+            bits::CEF_MEDIA_PERMISSION_NONE as u32
+          });
+        },
+      );
+      1
+    }
+
     fn on_show_permission_prompt(
       &self,
       _browser: Option<&mut Browser>,
