@@ -34,21 +34,6 @@ use crate::{
 
 type HttpResponse = Arc<RefCell<Option<http::Response<Cursor<Vec<u8>>>>>>;
 
-fn native_custom_protocol_url(protocol_scheme: &str, url: &Url) -> Url {
-  let is_protocol_alias = matches!(url.scheme(), "http" | "https")
-    && url.host_str() == Some(&format!("{protocol_scheme}.localhost"));
-  if !is_protocol_alias {
-    return url.clone();
-  }
-
-  let mut native_url = Url::parse(&format!("{protocol_scheme}://localhost"))
-    .expect("custom protocol scheme is a valid URL scheme");
-  native_url.set_path(url.path());
-  native_url.set_query(url.query());
-  native_url.set_fragment(url.fragment());
-  native_url
-}
-
 /// The pull side of a streaming custom-scheme response, installed by
 /// `process_request` when the request's scheme has a streaming handler. `head`
 /// is the shared slot the handler's `StreamResponder` publishes status +
@@ -280,7 +265,6 @@ wrap_resource_handler! {
   pub struct WebResourceHandler {
     webview_label: String,
     handler: Arc<Box<UriSchemeProtocolHandler>>,
-    protocol_scheme: String,
     initialization_scripts: Arc<Vec<CefInitScript>>,
     // Serialized origin of the main frame that initiated this request, captured
     // browser-side in the scheme handler factory. The renderer can issue an IPC
@@ -311,7 +295,6 @@ wrap_resource_handler! {
 
       let Some(url) = url else { return 0 };
       let scheme = url.scheme().to_string();
-      let url = native_custom_protocol_url(&self.protocol_scheme, &url);
 
       // Extraction shared by both paths — reads `request` before it is dropped.
       let label = self.webview_label.clone();
@@ -580,7 +563,6 @@ wrap_scheme_handler_factory! {
       Some(WebResourceHandler::new(
         webview_label,
         handler,
-        self.scheme.clone(),
         initialization_scripts,
         initiator_origin,
         Arc::new(RefCell::new(None)),
@@ -668,7 +650,7 @@ fn tuple_origin(url: &Url) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-  use super::{native_custom_protocol_url, tuple_origin};
+  use super::tuple_origin;
   use url::Url;
 
   #[test]
@@ -688,23 +670,6 @@ mod tests {
     // Genuinely origin-less: nothing to compare against, so no origin.
     let opaque = Url::parse("data:text/html,hi").unwrap();
     assert_eq!(tuple_origin(&opaque), None);
-  }
-
-  #[test]
-  fn translates_https_aliases_before_the_tauri_protocol_handler() {
-    let url = Url::parse("https://tauri.localhost/assets/index.js?version=1").unwrap();
-
-    assert_eq!(
-      native_custom_protocol_url("tauri", &url).as_str(),
-      "tauri://localhost/assets/index.js?version=1"
-    );
-  }
-
-  #[test]
-  fn does_not_translate_other_origins() {
-    let url = Url::parse("https://example.com/assets/index.js").unwrap();
-
-    assert_eq!(native_custom_protocol_url("tauri", &url), url);
   }
 }
 
