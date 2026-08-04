@@ -571,31 +571,6 @@ pub(crate) fn dispatch(
   }
 }
 
-/// CEF media-access bits → [`PermissionKind`]s (deduplicated: desktop audio and
-/// video capture are both [`PermissionKind::ScreenCapture`]).
-pub(crate) fn media_kinds(mask: u32) -> Vec<PermissionKind> {
-  use cef::sys::cef_media_access_permission_types_t as bits;
-  let table = [
-    (
-      bits::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32,
-      PermissionKind::Microphone,
-    ),
-    (
-      bits::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32,
-      PermissionKind::Camera,
-    ),
-    (
-      bits::CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE as u32,
-      PermissionKind::ScreenCapture,
-    ),
-    (
-      bits::CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE as u32,
-      PermissionKind::ScreenCapture,
-    ),
-  ];
-  kinds_from_mask(mask, &table)
-}
-
 /// CEF permission-prompt bits → [`PermissionKind`]s.
 pub(crate) fn prompt_kinds(mask: u32) -> Vec<PermissionKind> {
   use cef::sys::cef_permission_request_types_t as bits;
@@ -933,23 +908,7 @@ mod tests {
   }
 
   #[test]
-  fn masks_translate_and_unknown_bits_stay_unknown() {
-    use cef::sys::cef_media_access_permission_types_t as media;
-    let mask = media::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32
-      | media::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32;
-    assert_eq!(
-      media_kinds(mask),
-      vec![PermissionKind::Microphone, PermissionKind::Camera]
-    );
-
-    let desktop = media::CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE as u32
-      | media::CEF_MEDIA_PERMISSION_DESKTOP_VIDEO_CAPTURE as u32;
-    assert_eq!(
-      media_kinds(desktop),
-      vec![PermissionKind::ScreenCapture],
-      "desktop audio+video is one screen-capture grant"
-    );
-
+  fn prompt_masks_translate_and_unknown_bits_stay_unknown() {
     use cef::sys::cef_permission_request_types_t as prompt;
     assert_eq!(
       prompt_kinds(prompt::CEF_PERMISSION_TYPE_GEOLOCATION as u32),
@@ -969,6 +928,5 @@ mod tests {
       ],
       "a permission this build does not know must surface as Unknown, not vanish"
     );
-    assert!(media_kinds(0).is_empty());
   }
 }
