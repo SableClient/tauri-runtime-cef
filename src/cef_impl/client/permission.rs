@@ -4,13 +4,6 @@
 
 //! Adapter from CEF's permission callbacks to the runtime-neutral policy in
 //! [`crate::policy`].
-//!
-//! Both handlers hand the policy an owned [`PermissionResponder`] holding a
-//! reference-counted clone of the CEF callback, so a policy may answer now or
-//! later (a native consent prompt) without the callback dying underneath it.
-//! Every path — including a policy that panics its way out or drops the
-//! responder — completes the callback exactly once, and only an explicit
-//! verdict completes it with a grant.
 
 use cef::{rc::Rc as _, *};
 
@@ -30,11 +23,17 @@ wrap_permission_handler! {
       requested_permissions: u32,
       callback: Option<&mut MediaAccessCallback>,
     ) -> ::std::os::raw::c_int {
+      use cef::sys::cef_media_access_permission_types_t as bits;
+
+      let device_permissions = bits::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32
+        | bits::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32;
+      if requested_permissions & !device_permissions == 0 {
+        return 0;
+      }
+
       let Some(callback) = callback else {
         return 0;
       };
-      // Reference-counted clone: the callback outlives this stack frame when
-      // the policy defers to a prompt.
       let callback = callback.clone();
       let origin = requesting_origin.map(|origin| origin.to_string()).unwrap_or_default();
       let is_main_frame = frame.map(|frame| frame.is_main() != 0);
@@ -45,12 +44,10 @@ wrap_permission_handler! {
         policy::media_kinds(requested_permissions),
         is_main_frame,
         move |granted| {
-          // getUserMedia requires the granted mask to equal the requested one
-          // (cef_media_access_callback_t::cont), so this is all or nothing.
           callback.cont(if granted {
             requested_permissions
           } else {
-            cef::sys::cef_media_access_permission_types_t::CEF_MEDIA_PERMISSION_NONE as u32
+            bits::CEF_MEDIA_PERMISSION_NONE as u32
           });
         },
       );

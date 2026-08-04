@@ -1428,13 +1428,6 @@ impl<T: UserEvent> CefRuntime<T> {
       cache_path: Arc::new(cache_path.clone()),
     };
 
-    // NOT `--enable-media-stream`: CEF documents that switch as granting all
-    // media permissions, and it suppresses OnRequestMediaAccessPermission
-    // entirely ("This function will not be called if the --enable-media-stream
-    // command-line switch is used"). Every camera, microphone and screen
-    // request would bypass the permission policy — silently, since the handler
-    // never runs. Media access is gated like any other permission; an app that
-    // wants the blanket grant can set the switch itself through CefConfig.
     let mut app = TauriCefApp::new(
       context.clone(),
       context_initialized.clone(),
