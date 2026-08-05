@@ -909,6 +909,9 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
         );
       }
       WinitWindowEvent::Focused(focused) => {
+        for child in &appwindow.children {
+          child.host.set_focus(i32::from(focused));
+        }
         self.emit_window_event(window_id, WindowEvent::Focused(focused));
       }
       WinitWindowEvent::ThemeChanged(theme) => {
