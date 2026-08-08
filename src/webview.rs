@@ -915,11 +915,12 @@ fn getter<T: UserEvent, R>(
 
 macro_rules! webview_getter {
   ($self:ident, $variant:ident) => {{
+    let window_id = *$self.window_id.lock().unwrap();
     let (tx, rx) = mpsc::channel();
     getter(
       &$self.context,
       Message::Webview {
-        window_id: *$self.window_id.lock().unwrap(),
+        window_id,
         webview_id: $self.webview_id,
         message: WebviewMessage::$variant(tx),
       },
