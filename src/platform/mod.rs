@@ -15,7 +15,7 @@ pub mod macos;
   target_os = "netbsd",
   target_os = "openbsd"
 ))]
-pub mod linux;
+mod linux;
 
 use tauri_runtime::dpi::PhysicalRect;
 use winit::monitor::MonitorHandle;
