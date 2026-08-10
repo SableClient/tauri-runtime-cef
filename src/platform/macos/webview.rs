@@ -72,11 +72,6 @@ impl AppWebview {
     nsview.setHidden(!visible);
   }
 
-  pub(crate) fn destroy_native(&self) {
-    let nsview = self.nsview();
-    nsview.removeFromSuperview();
-  }
-
   pub(crate) fn apply_physical_bounds(&self, scale: f64, x: i32, y: i32, width: i32, height: i32) {
     let nsview = self.nsview();
     let Some(parent) = (unsafe { nsview.superview() }) else {

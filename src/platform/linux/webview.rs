@@ -105,14 +105,6 @@ impl AppWebview {
     });
   }
 
-  pub(crate) fn destroy_native(&self) {
-    let xid = self.xid();
-    with_cef_display((), |xlib, display| unsafe {
-      (xlib.XDestroyWindow)(display, xid);
-      (xlib.XFlush)(display);
-    });
-  }
-
   pub(crate) fn apply_physical_bounds(&self, _scale: f64, x: i32, y: i32, width: i32, height: i32) {
     let xid = self.xid();
 

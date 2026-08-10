@@ -5,10 +5,14 @@
 use std::sync::{Arc, mpsc::Sender};
 
 use cef::*;
-use tauri_runtime::{UserEvent, window::WindowId};
+use tauri_runtime::{
+  UserEvent,
+  dpi::{LogicalPosition, LogicalSize},
+  window::WindowId,
+};
 use winit::event_loop::EventLoopProxy as WinitEventLoopProxy;
 
-use crate::runtime::{Message, RuntimeContext};
+use crate::runtime::{CefRuntime, Message, NewWindowOpener, RuntimeContext};
 
 // There is some race condition on CEF that causes the app loading to fail
 // when there is a network service crash:
@@ -48,9 +52,8 @@ wrap_life_span_handler! {
     proxy: WinitEventLoopProxy,
     window_id: WindowId,
     webview_id: u32,
-    webview_label: String,
     context: RuntimeContext<T>,
-    new_window_handler: Option<Arc<crate::compat::NewWindowHandler>>,
+    new_window_handler: Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
     initial_url: Option<String>,
   }
 
@@ -72,41 +75,60 @@ wrap_life_span_handler! {
       _target_frame_name: Option<&CefString>,
       _target_disposition: WindowOpenDisposition,
       _user_gesture: std::os::raw::c_int,
-      _popup_features: Option<&PopupFeatures>,
+      popup_features: Option<&PopupFeatures>,
       _window_info: Option<&mut WindowInfo>,
       _client: Option<&mut Option<Client>>,
       _settings: Option<&mut BrowserSettings>,
       _extra_info: Option<&mut Option<DictionaryValue>>,
       _no_javascript_access: Option<&mut i32>,
     ) -> std::os::raw::c_int {
-      // Return value: 0 = allow the popup, 1 = cancel it.
-      // A crate-level popup policy (set_popup_policy) decides per URL/label
-      // when installed.
-      let url = target_url.map(|u| u.to_string()).unwrap_or_default();
-      if let Some(allow) = crate::policy::popup_allowed(&crate::policy::PopupRequest {
-        webview_label: &self.webview_label,
-        url: &url,
-      }) {
-        return i32::from(!allow);
+      let Some(handler) = &self.new_window_handler else {
+        return 0;
+      };
+
+      let Some(target_url) = target_url else {
+        return 1;
+      };
+
+      let url_str = target_url.to_string();
+      let Ok(url) = url::Url::parse(&url_str) else {
+        return 1;
+      };
+
+      // window.open() features are CSS pixels, which map to Tauri's logical units.
+      let size = popup_features.and_then(|features| {
+        (features.width_set != 0 && features.height_set != 0)
+          .then(|| LogicalSize::new(features.width as f64, features.height as f64))
+      });
+      let position = popup_features.and_then(|features| {
+        (features.x_set != 0 && features.y_set != 0)
+          .then(|| LogicalPosition::new(features.x as f64, features.y as f64))
+      });
+      let features =
+        tauri_runtime::webview::NewWindowFeatures::new(size, position, NewWindowOpener {});
+
+      match handler(url, features) {
+        tauri_runtime::webview::NewWindowResponse::Allow => 0,
+        tauri_runtime::webview::NewWindowResponse::Create { window_id } => {
+          // CEF cannot transplant a popup's contents into an existing
+          // browser, so cancel the popup and navigate the designated
+          // window's first webview to the URL instead — the closest
+          // equivalent of wry hosting the popup in that window's webview.
+          // Note `window.opener` is not linked to the new document.
+          let _ = self.context.send_message(Message::NavigateFirstWebview {
+            window_id,
+            url: url_str,
+          });
+          1
+        }
+        tauri_runtime::webview::NewWindowResponse::Deny => 1,
       }
-      // ponytail: published tauri's new-window handler cannot be invoked from
-      // CEF — its NewWindowFeatures wraps a wry platform webview handle
-      // (webkit2gtk::WebView on Linux) that a CEF browser cannot construct.
-      // An installed handler therefore degrades to a popup deny (the
-      // verdict every current caller returns); no handler keeps CEF's native
-      // popup behavior. Revisit when upstream releases feat/cef's
-      // runtime-generic opener.
-      i32::from(self.new_window_handler.is_some())
     }
 
     fn on_before_close(&self, browser: Option<&mut Browser>) {
       if browser.is_none() {
         return;
       }
-      // Any permission prompt still open over this webview can no longer be
-      // granted to — deny it rather than leave the callback (and the app's
-      // consent UI) hanging over a dead browser.
-      crate::policy::cancel_pending(&self.webview_label);
       let _ = self
         .sender
         .send(Message::BrowserClosed(self.window_id, self.webview_id));
