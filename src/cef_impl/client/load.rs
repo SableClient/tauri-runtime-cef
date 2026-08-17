@@ -8,7 +8,7 @@ use cef::*;
 
 wrap_load_handler! {
   pub struct TauriCefLoadHandler {
-    on_page_load_handler: Option<Arc<crate::compat::OnPageLoadHandler>>,
+    on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
   }
 
   impl LoadHandler {
