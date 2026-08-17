@@ -10,7 +10,7 @@ use winit::event_loop::EventLoopProxy as WinitEventLoopProxy;
 
 use crate::{
   cef_impl::{ipc, request_handler},
-  runtime::{Message, RuntimeContext},
+  runtime::{CefRuntime, Message, RuntimeContext},
 };
 
 mod context_menu;
@@ -39,13 +39,14 @@ pub(crate) use process::TauriCefBrowserProcessHandler;
 
 pub(crate) struct TauriCefBrowserClientHandlers<T: UserEvent> {
   pub(crate) ipc_handler: Option<Arc<ipc::IpcHandler<T>>>,
-  pub(crate) on_page_load_handler: Option<Arc<crate::compat::OnPageLoadHandler>>,
+  pub(crate) on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
   pub(crate) document_title_changed_handler:
-    Option<Arc<crate::compat::DocumentTitleChangedHandler>>,
-  pub(crate) navigation_handler: Option<Arc<crate::compat::NavigationHandler>>,
-  pub(crate) address_changed_handler: Option<Arc<crate::compat::AddressChangedHandler>>,
-  pub(crate) new_window_handler: Option<Arc<crate::compat::NewWindowHandler>>,
-  pub(crate) download_handler: Option<Arc<crate::compat::DownloadHandler>>,
+    Option<Arc<tauri_runtime::webview::DocumentTitleChangedHandler>>,
+  pub(crate) navigation_handler: Option<Arc<tauri_runtime::webview::NavigationHandler>>,
+  pub(crate) address_changed_handler: Option<Arc<tauri_runtime::webview::AddressChangedHandler>>,
+  pub(crate) new_window_handler:
+    Option<Arc<tauri_runtime::webview::NewWindowHandler<T, CefRuntime<T>>>>,
+  pub(crate) download_handler: Option<Arc<tauri_runtime::webview::DownloadHandler>>,
   pub(crate) web_content_process_terminate_handler: Option<Arc<dyn Fn() + Send>>,
 }
 
@@ -106,7 +107,6 @@ wrap_client! {
         self.proxy.clone(),
         self.window_id,
         self.webview_id,
-        self.label.clone(),
         self.context.clone(),
         self.handlers.new_window_handler.clone(),
         self.initial_url.clone(),
@@ -143,7 +143,7 @@ wrap_client! {
     }
 
     fn permission_handler(&self) -> Option<PermissionHandler> {
-      Some(TauriCefPermissionHandler::new(self.label.clone()))
+      Some(TauriCefPermissionHandler::new())
     }
 
     fn on_process_message_received(

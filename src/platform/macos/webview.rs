@@ -72,9 +72,14 @@ impl AppWebview {
     nsview.setHidden(!visible);
   }
 
-  pub(crate) fn destroy_native(&self) {
-    let nsview = self.nsview();
-    nsview.removeFromSuperview();
+  /// Destroys CEF's own view for this browser, completing a close that
+  /// `do_close` took over.
+  ///
+  /// The superview holds the only strong reference to that view, so dropping it
+  /// deallocates the view — and its `dealloc` is what reports `WindowDestroyed`
+  /// back to CEF.
+  pub(crate) fn destroy_host_window(&self) {
+    self.nsview().removeFromSuperview();
   }
 
   pub(crate) fn apply_physical_bounds(&self, scale: f64, x: i32, y: i32, width: i32, height: i32) {
