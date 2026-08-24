@@ -136,6 +136,10 @@ impl PlatformPump {
   pub(super) fn is_timer_pending(&self) -> bool {
     get_time_interval_milliseconds(self.source_state.delayed_work_time) > 0
   }
+
+  pub(super) fn deadline(&self) -> Option<Instant> {
+    self.source_state.delayed_work_time
+  }
 }
 
 impl Drop for PlatformPump {

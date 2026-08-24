@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::os::raw::{c_int, c_uint, c_ulong};
+use std::os::raw::c_ulong;
 use tauri_runtime::ProgressBarState;
 use tauri_utils::config::Color;
 
@@ -26,35 +26,6 @@ impl AppWindow {
       RawWindowHandle::Xcb(handle) => handle.window.get() as c_ulong,
       other => panic!("expected X11 window handle, got {other:?}"),
     }
-  }
-
-  /// Whether the X11 keyboard focus sits on this window or a descendant. Tells a
-  /// real focus loss apart from the `FocusOut`/`NotifyInferior` that
-  /// [`AppWebview::take_input_focus`] causes.
-  pub(crate) fn owns_input_focus(&self) -> bool {
-    let xid = self.xid();
-
-    super::utils::with_cef_display(false, |xlib, display| unsafe {
-      let mut focus: x11_dl::xlib::Window = 0;
-      let mut revert_to: c_int = 0;
-      if (xlib.XGetInputFocus)(display, &mut focus, &mut revert_to) == 0 {
-        return false;
-      }
-
-      // `None` and `PointerRoot` are not real windows.
-      if focus <= x11_dl::xlib::PointerRoot as x11_dl::xlib::Window {
-        return false;
-      }
-
-      let mut current = focus;
-      while current != 0 {
-        if current == xid {
-          return true;
-        }
-        current = parent_window(xlib, display, current);
-      }
-      false
-    })
   }
 
   pub(crate) fn set_enabled(&self, enabled: bool) {
@@ -104,34 +75,4 @@ impl AppWindow {
   pub(crate) fn set_progress_bar(&self, state: ProgressBarState) {
     taskbar::set_progress_bar(state);
   }
-}
-
-fn parent_window(
-  xlib: &x11_dl::xlib::Xlib,
-  display: *mut x11_dl::xlib::Display,
-  window: x11_dl::xlib::Window,
-) -> x11_dl::xlib::Window {
-  let mut root: x11_dl::xlib::Window = 0;
-  let mut parent: x11_dl::xlib::Window = 0;
-  let mut children: *mut x11_dl::xlib::Window = std::ptr::null_mut();
-  let mut child_count: c_uint = 0;
-
-  unsafe {
-    if (xlib.XQueryTree)(
-      display,
-      window,
-      &mut root,
-      &mut parent,
-      &mut children,
-      &mut child_count,
-    ) == 0
-    {
-      return 0;
-    }
-    if !children.is_null() {
-      (xlib.XFree)(children.cast());
-    }
-  }
-
-  parent
 }
