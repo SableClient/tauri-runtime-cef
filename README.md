@@ -80,7 +80,7 @@ Capabilities this crate adds on top of the imported runtime:
 
   The policy runs on a CEF thread and must not block: decide immediately, or `defer` and answer from your event loop.
 - **Popup policy** (`set_popup_policy`): per-URL / per-webview-label `window.open` decisions.
-- **Cache-lock fail-fast**: when another live process already holds the CEF cache's `SingletonLock`, runtime init returns an actionable error naming the holder pid and the fix (Chromium otherwise only surfaces the conflict later, as a renderer/GPU startup failure).
+- **Cache-lock fail-fast**: when another live instance of the app already holds the CEF cache's `SingletonLock`, runtime init returns an actionable error naming the holder pid and the fix (Chromium otherwise only surfaces the conflict later, as a renderer/GPU startup failure).
 - **Exit codes**: `run_return` reports the code passed to exit requests.
 
 ## Port notes

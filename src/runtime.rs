@@ -1121,14 +1121,45 @@ fn live_singleton_lock_holder(cache_path: &std::path::Path) -> Option<u32> {
     return None;
   }
   #[cfg(target_os = "linux")]
-  let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+  let held = is_other_instance(pid);
   #[cfg(not(target_os = "linux"))]
-  let alive = std::process::Command::new("kill")
-    .args(["-0", &pid.to_string()])
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false);
-  alive.then_some(pid)
+  let held = pid != std::process::id()
+    && std::process::Command::new("kill")
+      .args(["-0", &pid.to_string()])
+      .status()
+      .map(|s| s.success())
+      .unwrap_or(false);
+  held.then_some(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn is_other_instance(pid: u32) -> bool {
+  let Ok(their_exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+    return false;
+  };
+  if std::fs::read_link("/proc/self/exe").ok() != Some(their_exe) {
+    return false;
+  }
+  let mut current = std::process::id();
+  while current > 1 {
+    if current == pid {
+      return false;
+    }
+    match parent_pid(current) {
+      Some(parent) => current = parent,
+      None => break,
+    }
+  }
+  true
+}
+
+#[cfg(target_os = "linux")]
+fn parent_pid(pid: u32) -> Option<u32> {
+  std::fs::read_to_string(format!("/proc/{pid}/status"))
+    .ok()?
+    .lines()
+    .find_map(|line| line.strip_prefix("PPid:"))
+    .and_then(|value| value.trim().parse().ok())
 }
 
 pub fn run_cef_helper_process() {
@@ -1791,5 +1822,78 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
 
   fn run<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) {
     self.run_return(callback);
+  }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use super::live_singleton_lock_holder;
+  use std::process::{Child, Command, Stdio};
+
+  fn lock_dir(target: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(target, dir.path().join("SingletonLock")).unwrap();
+    dir
+  }
+
+  fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+      .unwrap()
+      .trim()
+      .to_string()
+  }
+
+  fn spawn_sibling() -> Child {
+    let child = Command::new(std::env::current_exe().unwrap())
+      .arg("sleeper_child")
+      .env("CEF_SINGLETON_LOCK_SLEEPER", "1")
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .unwrap();
+    for _ in 0..200 {
+      if std::fs::read_link(format!("/proc/{}/exe", child.id())).is_ok() {
+        break;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    child
+  }
+
+  #[test]
+  fn sleeper_child() {
+    if std::env::var_os("CEF_SINGLETON_LOCK_SLEEPER").is_some() {
+      std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+  }
+
+  #[test]
+  fn lock_from_a_foreign_pid_namespace_is_ignored() {
+    let dir = lock_dir(&format!("{}-2", hostname()));
+    assert_eq!(live_singleton_lock_holder(dir.path()), None);
+  }
+
+  #[test]
+  fn our_own_pid_is_not_a_holder() {
+    let dir = lock_dir(&format!("{}-{}", hostname(), std::process::id()));
+    assert_eq!(live_singleton_lock_holder(dir.path()), None);
+  }
+
+  #[test]
+  fn a_lock_from_another_host_is_ignored() {
+    let dir = lock_dir(&format!("not-this-host-{}", std::process::id()));
+    assert_eq!(live_singleton_lock_holder(dir.path()), None);
+  }
+
+  #[test]
+  fn a_live_second_instance_is_reported() {
+    let mut sibling = spawn_sibling();
+    let dir = lock_dir(&format!("{}-{}", hostname(), sibling.id()));
+
+    let holder = live_singleton_lock_holder(dir.path());
+
+    let _ = sibling.kill();
+    let _ = sibling.wait();
+    assert_eq!(holder, Some(sibling.id()));
   }
 }
