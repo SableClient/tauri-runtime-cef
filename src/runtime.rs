@@ -53,6 +53,8 @@ use crate::{
 };
 #[cfg(target_os = "macos")]
 use winit::platform::macos::EventLoopBuilderExtMacOS;
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 #[cfg(any(
@@ -113,7 +115,8 @@ pub(crate) struct RuntimeContext<T: UserEvent> {
 /// treated as valid beyond their callback.
 #[derive(Clone, Copy)]
 struct MainThreadDispatch<T: UserEvent> {
-  app: *mut WinitCefApp<T>,
+  app: *mut (),
+  handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
   event_loop: *const dyn ActiveEventLoop,
 }
 
@@ -154,7 +157,7 @@ impl<T: UserEvent> Default for MainThreadDispatchSlot<T> {
   }
 }
 
-struct MainThreadDispatchGuard<T: UserEvent> {
+pub(crate) struct MainThreadDispatchGuard<T: UserEvent> {
   context: RuntimeContext<T>,
   dispatch: Box<MainThreadDispatch<T>>,
   previous: *mut MainThreadDispatch<T>,
@@ -178,13 +181,11 @@ fn handle_main_thread_message<T: UserEvent>(
     return Err(message);
   };
 
-  // SAFETY: `WinitCefApp::install_current_dispatch` stores pointers to the currently
-  // executing winit application handler and event-loop callback. This function
-  // is only called on the runtime main thread while that callback is active.
-  let app = unsafe { &mut *dispatch.app };
+  // SAFETY: `install_current_dispatch` stores the currently executing application
+  // handler and event-loop callback. This only runs on the runtime main thread
+  // while that callback is active.
   let event_loop = unsafe { &*dispatch.event_loop };
-
-  app.handle_message(event_loop, message);
+  unsafe { (dispatch.handle)(dispatch.app, event_loop, message) };
 
   Ok(())
 }
@@ -196,6 +197,25 @@ impl<T: UserEvent> fmt::Debug for RuntimeContext<T> {
 }
 
 impl<T: UserEvent> RuntimeContext<T> {
+  pub(crate) fn install_current_dispatch(
+    &self,
+    app: *mut (),
+    handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
+    event_loop: &dyn ActiveEventLoop,
+  ) -> MainThreadDispatchGuard<T> {
+    let mut dispatch = Box::new(MainThreadDispatch {
+      app,
+      handle,
+      event_loop: event_loop as *const _,
+    });
+    let previous = self.current_dispatch.install(dispatch.as_mut());
+    MainThreadDispatchGuard {
+      context: self.clone(),
+      dispatch,
+      previous,
+    }
+  }
+
   pub(crate) fn send_message(&self, message: Message<T>) -> Result<()> {
     let message = if self.is_main_thread() {
       match handle_main_thread_message(self, message) {
@@ -464,18 +484,18 @@ impl<T: UserEvent> WinitCefApp<T> {
     &mut self,
     event_loop: &dyn ActiveEventLoop,
   ) -> MainThreadDispatchGuard<T> {
-    let mut dispatch = Box::new(MainThreadDispatch {
-      app: self as *mut _,
-      event_loop: event_loop as *const _,
-    });
-
-    let previous = self.context.current_dispatch.install(dispatch.as_mut());
-
-    MainThreadDispatchGuard {
-      context: self.context.clone(),
-      dispatch,
-      previous,
+    unsafe fn handle<T: UserEvent>(
+      app: *mut (),
+      event_loop: &dyn ActiveEventLoop,
+      message: Message<T>,
+    ) {
+      unsafe { &mut *app.cast::<WinitCefApp<T>>() }.handle_message(event_loop, message);
     }
+
+    let app = (self as *mut Self).cast();
+    self
+      .context
+      .install_current_dispatch(app, handle::<T>, event_loop)
   }
 
   fn drain_messages(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -1517,9 +1537,16 @@ impl<T: UserEvent> CefRuntime<T> {
       ));
     }
 
-    // Force X11 usage on Linux
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      command_line_args.push(("ozone-platform".into(), Some("wayland".into())));
+      event_loop_builder.with_wayland();
+    } else {
+      command_line_args.push(("ozone-platform".into(), Some("x11".into())));
+      event_loop_builder.with_x11();
+    }
+
     #[cfg(any(
-      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "netbsd",
@@ -1630,8 +1657,11 @@ impl<T: UserEvent> CefRuntime<T> {
     // Baseline for embedders that never touch GTK. One that calls `gtk_init`
     // must call `install_x_error_handlers` again afterwards — GTK's X11 backend
     // replaces the handler during init.
+    #[cfg(target_os = "linux")]
+    if !crate::config::native_wayland() {
+      crate::platform::linux::install_x_error_handlers();
+    }
     #[cfg(any(
-      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "openbsd",
@@ -1705,6 +1735,13 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   ))]
   fn new_any_thread(args: RuntimeInitArgs) -> Result<Self> {
     let mut event_loop_builder = EventLoopBuilder::default();
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      EventLoopBuilderExtWayland::with_any_thread(&mut event_loop_builder, true);
+    } else {
+      EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
+    }
+    #[cfg(not(target_os = "linux"))]
     event_loop_builder.with_any_thread(true);
     Self::init(event_loop_builder, args)
   }
@@ -1808,6 +1845,19 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
 
   fn run_return<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) -> i32 {
     let exit_code = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    #[cfg(target_os = "linux")]
+    if crate::config::native_wayland() {
+      let app = crate::wayland::App::new(
+        self.context,
+        self.receiver,
+        Box::new(callback),
+        self.scheme_registry,
+        exit_code.clone(),
+      );
+      let _ = self.event_loop.run_app(app);
+      cef::shutdown();
+      return exit_code.load(Ordering::Acquire);
+    }
     let app = WinitCefApp::new(
       self.context,
       self.receiver,

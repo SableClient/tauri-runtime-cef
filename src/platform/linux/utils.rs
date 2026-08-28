@@ -108,6 +108,11 @@ unsafe extern "C" fn x_io_error_handler(_display: *mut xlib::Display) -> c_int {
 /// why cefclient installs its handlers *after* `gtk_init` rather than before.
 /// Calling this more than once is harmless.
 pub fn install_x_error_handlers() {
+  #[cfg(target_os = "linux")]
+  if crate::config::native_wayland() {
+    return;
+  }
+
   let Some(xlib) = XLIB.as_ref() else {
     return;
   };

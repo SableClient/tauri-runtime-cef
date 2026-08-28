@@ -23,6 +23,15 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+/// Linux window system selected before CEF and the event loop start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LinuxWindowing {
+  #[default]
+  X11,
+  /// A CEF Views-owned top-level window using Ozone/Wayland.
+  Wayland,
+}
+
 /// CEF runtime configuration, applied at `CefRuntime` creation (browser
 /// process) and at custom-scheme registration (all processes).
 #[derive(Debug, Clone)]
@@ -46,6 +55,8 @@ pub struct CefConfig {
   /// by default, so `document.cookie` and `Set-Cookie` are inert on custom
   /// schemes not listed here. The http/https defaults are preserved.
   pub cookieable_schemes: Vec<String>,
+  /// Linux window system. Ignored on other platforms.
+  pub linux_windowing: LinuxWindowing,
 }
 
 impl Default for CefConfig {
@@ -60,6 +71,7 @@ impl Default for CefConfig {
       deep_link_schemes: Vec::new(),
       custom_schemes: vec!["tauri".into(), "ipc".into(), "asset".into()],
       cookieable_schemes: Vec::new(),
+      linux_windowing: LinuxWindowing::X11,
     }
   }
 }
@@ -75,4 +87,9 @@ pub fn configure(config: CefConfig) {
 
 pub(crate) fn config() -> &'static CefConfig {
   CONFIG.get_or_init(CefConfig::default)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn native_wayland() -> bool {
+  config().linux_windowing == LinuxWindowing::Wayland
 }

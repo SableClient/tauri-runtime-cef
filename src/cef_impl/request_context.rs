@@ -180,10 +180,10 @@ pub(crate) fn wait_for_deferred_init(flag: &Arc<AtomicBool>) {
 /// [`wait_for_deferred_init`] on this thread toggles the flag, which makes
 /// nesting (e.g. an `on_initialized` continuation that creates another
 /// webview) safe.
-struct AllowNestableTasks;
+pub(crate) struct AllowNestableTasks;
 
 impl AllowNestableTasks {
-  fn enter() -> Self {
+  pub(crate) fn enter() -> Self {
     NESTABLE_TASKS_DEPTH.with(|depth| {
       let current = depth.get();
       if current == 0 {

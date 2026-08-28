@@ -13,12 +13,14 @@ mod platform;
 mod policy;
 mod runtime;
 mod streaming;
+#[cfg(target_os = "linux")]
+mod wayland;
 mod webview;
 mod window;
 mod window_builder;
 mod window_handle;
 
-pub use config::{CefConfig, configure};
+pub use config::{CefConfig, LinuxWindowing, configure};
 #[cfg(any(
   target_os = "linux",
   target_os = "dragonfly",
