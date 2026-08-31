@@ -30,13 +30,9 @@ use winit::{
   window::{Window as WinitWindow, WindowAttributes, WindowLevel},
 };
 
-#[cfg(target_os = "macos")]
-use crate::platform::macos::AppkitState;
 use crate::platform::{EventLoopExt, MonitorExt};
 #[cfg(any(windows, target_os = "macos"))]
 use std::marker::PhantomData;
-#[cfg(target_os = "macos")]
-use std::sync::RwLock;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowExtMacOS;
 #[cfg(windows)]
@@ -329,10 +325,6 @@ pub(crate) struct AppWindow {
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
   pub(crate) listeners: WindowEventListeners,
-  /// Last focus state reported to Tauri. See `WinitCefApp::sync_window_focus`.
-  pub(crate) reported_focus: bool,
-  #[cfg(target_os = "macos")]
-  pub(crate) appkit_state: Arc<RwLock<AppkitState>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -403,6 +395,8 @@ impl AppWindow {
     self.attrs.inner.preferred_theme = tauri_theme_to_winit_theme(theme);
     self.window.set_theme(tauri_theme_to_winit_theme(theme));
     self.apply_cef_theme(theme);
+    #[cfg(target_os = "macos")]
+    self.reapply_traffic_light_position_after_appearance_change();
   }
 
   fn apply_cef_theme(&self, theme: Option<Theme>) {
@@ -443,14 +437,10 @@ impl<T: UserEvent> WinitCefApp<T> {
       attrs,
       children: Vec::new(),
       listeners: Default::default(),
-      reported_focus: false,
-      #[cfg(target_os = "macos")]
-      appkit_state: Arc::new(RwLock::new(AppkitState::default())),
     };
 
     #[cfg(target_os = "macos")]
     {
-      appwindow.associate_appkit_state();
       appwindow.set_visible_on_all_workspaces(appwindow.attrs.visible_on_all_workspaces);
       if let Some(position) = &appwindow.attrs.traffic_light_position {
         appwindow.set_traffic_light_position(position);
@@ -470,9 +460,7 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
 
     #[cfg(windows)]
-    if appwindow.attrs.inner.transparent || appwindow.attrs.background_color.is_some() {
-      appwindow.draw_background_surface();
-    }
+    appwindow.draw_background_surface();
 
     #[cfg(not(windows))]
     if appwindow.attrs.background_color.is_some() {
@@ -540,9 +528,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::AddEventListener(id, listener) => {
         appwindow.listeners.lock().unwrap().insert(id, listener);
       }
-      WindowMessage::Close | WindowMessage::Destroy => {
-        unreachable!("handled before borrowing")
-      }
+      WindowMessage::Close | WindowMessage::Destroy => unreachable!("handled before borrowing"),
       WindowMessage::ScaleFactor(tx) => _ = tx.send(Ok(window.scale_factor())),
       WindowMessage::InnerSize(tx) => _ = tx.send(Ok(window.surface_size())),
       WindowMessage::OuterSize(tx) => _ = tx.send(Ok(window.outer_size())),
@@ -753,7 +739,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::SetTrafficLightPosition(_position) => {
         #[cfg(target_os = "macos")]
         {
-          appwindow.attrs.traffic_light_position = Some(_position.clone());
+          appwindow.attrs.traffic_light_position = Some(_position);
           appwindow.set_traffic_light_position(&_position);
         }
       }
@@ -1211,7 +1197,7 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
   fn set_icon(&self, icon: Icon) -> Result<()> {
     self.context.send_message(Message::Window {
       window_id: self.window_id,
-      message: WindowMessage::SetIcon(crate::compat::icon_into_owned(icon)),
+      message: WindowMessage::SetIcon(icon.into_owned()),
     })
   }
 
@@ -1288,7 +1274,7 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
   fn set_overlay_icon(&self, icon: Option<Icon>) -> Result<()> {
     self.context.send_message(Message::Window {
       window_id: self.window_id,
-      message: WindowMessage::SetOverlayIcon(icon.map(crate::compat::icon_into_owned)),
+      message: WindowMessage::SetOverlayIcon(icon.map(Icon::into_owned)),
     })
   }
 
@@ -1339,16 +1325,17 @@ where
 {
   let label = pending.label.clone();
   let window_id = context.next_window_id();
-  let (webview_id, use_https_scheme) = pending
+  let (webview_id, use_https_scheme, devtools) = pending
     .webview
     .as_ref()
     .map(|w| {
       (
         Some(context.next_webview_id()),
         w.webview_attributes.use_https_scheme,
+        w.webview_attributes.devtools,
       )
     })
-    .unwrap_or((None, false));
+    .unwrap_or((None, false, None));
 
   let (result_tx, result_rx) = mpsc::channel();
   context.send_message(Message::CreateWindow {
@@ -1374,6 +1361,7 @@ where
       },
     },
     use_https_scheme,
+    devtools,
   });
 
   Ok(DetachedWindow {

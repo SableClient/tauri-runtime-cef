@@ -44,7 +44,10 @@ use crate::external_message_pump::CefExternalPump;
 use crate::platform::EventLoopExt;
 use crate::{
   cef_impl::{client as browser_client, ipc, request_handler},
-  webview::{self, AppWebview, CefWebviewDispatcher, WebviewMessage, create_webview_detached},
+  webview::{
+    self, AppWebview, CefWebviewDispatcher, Webview, WebviewAtribute, WebviewMessage,
+    create_webview_detached,
+  },
   window::{
     AppWindow, CefWindowDispatcher, WindowMessage, create_window_detached,
     winit_monitor_to_tauri_monitor, winit_theme_to_tauri_theme,
@@ -53,8 +56,6 @@ use crate::{
 };
 #[cfg(target_os = "macos")]
 use winit::platform::macos::EventLoopBuilderExtMacOS;
-#[cfg(target_os = "linux")]
-use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 #[cfg(any(
@@ -74,6 +75,57 @@ use winit::platform::x11::EventLoopBuilderExtX11;
 /// no API stability guarantees. The crate will be updated frequently, usually
 /// in minor releases when a known breaking change is discovered.
 pub use cef;
+
+/// Platform-specific runtime init attributes.
+#[derive(Clone, Debug)]
+pub enum RuntimeInitAttribute {
+  /// Command line arguments passed to CEF.
+  CommandLineArgs { args: Vec<(String, Option<String>)> },
+  /// Deep link schemes.
+  DeepLinkSchemes { schemes: Vec<String> },
+  /// Directory used for CEF disk cache (`Settings::cache_path`).
+  ///
+  /// If unspecified, defaults to `{user cache}/{app identifier}/cef`.
+  CachePath { path: PathBuf },
+  /// CEF API version this process declares (`cef_api_hash`), defaulting to
+  /// `cef::sys::CEF_API_VERSION_LAST`.
+  ApiVersion { version: i32 },
+}
+
+impl tauri_runtime::InitAttribute for RuntimeInitAttribute {
+  fn new(config: &tauri_utils::config::Config) -> Result<Vec<Self>> {
+    let mut attrs = Vec::new();
+    if let Some(plugin_config) = config
+      .plugins
+      .0
+      .get("deep-link")
+      .and_then(|config| config.get("desktop").cloned())
+    {
+      #[derive(serde::Deserialize)]
+      #[serde(untagged)]
+      enum DesktopDeepLinks {
+        One(tauri_utils::config::DeepLinkProtocol),
+        List(Vec<tauri_utils::config::DeepLinkProtocol>),
+      }
+
+      let protocols: DesktopDeepLinks =
+        serde_json::from_value(plugin_config).map_err(tauri_runtime::Error::Json)?;
+      let schemes = match protocols {
+        DesktopDeepLinks::One(protocol) => protocol.schemes,
+        DesktopDeepLinks::List(protocols) => protocols
+          .into_iter()
+          .flat_map(|protocol| protocol.schemes)
+          .collect(),
+      };
+
+      attrs.push(RuntimeInitAttribute::DeepLinkSchemes { schemes });
+    }
+    Ok(attrs)
+  }
+}
+
+#[derive(Debug)]
+pub struct NewWindowOpener {}
 
 #[derive(Clone, Debug)]
 pub struct EventProxy<T: UserEvent> {
@@ -115,8 +167,7 @@ pub(crate) struct RuntimeContext<T: UserEvent> {
 /// treated as valid beyond their callback.
 #[derive(Clone, Copy)]
 struct MainThreadDispatch<T: UserEvent> {
-  app: *mut (),
-  handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
+  app: *mut WinitCefApp<T>,
   event_loop: *const dyn ActiveEventLoop,
 }
 
@@ -157,7 +208,7 @@ impl<T: UserEvent> Default for MainThreadDispatchSlot<T> {
   }
 }
 
-pub(crate) struct MainThreadDispatchGuard<T: UserEvent> {
+struct MainThreadDispatchGuard<T: UserEvent> {
   context: RuntimeContext<T>,
   dispatch: Box<MainThreadDispatch<T>>,
   previous: *mut MainThreadDispatch<T>,
@@ -181,11 +232,13 @@ fn handle_main_thread_message<T: UserEvent>(
     return Err(message);
   };
 
-  // SAFETY: `install_current_dispatch` stores the currently executing application
-  // handler and event-loop callback. This only runs on the runtime main thread
-  // while that callback is active.
+  // SAFETY: `WinitCefApp::install_current_dispatch` stores pointers to the currently
+  // executing winit application handler and event-loop callback. This function
+  // is only called on the runtime main thread while that callback is active.
+  let app = unsafe { &mut *dispatch.app };
   let event_loop = unsafe { &*dispatch.event_loop };
-  unsafe { (dispatch.handle)(dispatch.app, event_loop, message) };
+
+  app.handle_message(event_loop, message);
 
   Ok(())
 }
@@ -197,25 +250,6 @@ impl<T: UserEvent> fmt::Debug for RuntimeContext<T> {
 }
 
 impl<T: UserEvent> RuntimeContext<T> {
-  pub(crate) fn install_current_dispatch(
-    &self,
-    app: *mut (),
-    handle: unsafe fn(*mut (), &dyn ActiveEventLoop, Message<T>),
-    event_loop: &dyn ActiveEventLoop,
-  ) -> MainThreadDispatchGuard<T> {
-    let mut dispatch = Box::new(MainThreadDispatch {
-      app,
-      handle,
-      event_loop: event_loop as *const _,
-    });
-    let previous = self.current_dispatch.install(dispatch.as_mut());
-    MainThreadDispatchGuard {
-      context: self.clone(),
-      dispatch,
-      previous,
-    }
-  }
-
   pub(crate) fn send_message(&self, message: Message<T>) -> Result<()> {
     let message = if self.is_main_thread() {
       match handle_main_thread_message(self, message) {
@@ -278,6 +312,10 @@ pub(crate) type AfterWindowCreationCallback = Box<dyn for<'a> Fn(RawWindow<'a>) 
 pub(crate) enum Message<T: UserEvent> {
   EventLoop(EventLoopMessage),
   BrowserClosed(WindowId, u32),
+  /// CEF handed us the teardown of a webview's browser, keyed by the webview's
+  /// process-unique id. See `TauriCefChildLifeSpanHandler::do_close`.
+  #[cfg(any(target_os = "macos", windows))]
+  DestroyWebviewHostWindow(u32),
   Opened(Vec<url::Url>),
   #[cfg(target_os = "macos")]
   Reopen {
@@ -309,6 +347,10 @@ pub(crate) enum Message<T: UserEvent> {
     webview_id: u32,
     message: WebviewMessage,
   },
+  NavigateFirstWebview {
+    window_id: WindowId,
+    url: String,
+  },
   DragDropScriptEvent {
     window_id: WindowId,
     webview_id: u32,
@@ -332,9 +374,9 @@ fn device_event_filter_to_winit(filter: DeviceEventFilter) -> winit::event_loop:
 pub(crate) enum EventLoopMessage {
   SetTheme(Option<Theme>),
   SetDeviceEventFilter(DeviceEventFilter),
-  PrimaryMonitor(Sender<Option<Monitor>>),
-  MonitorFromPoint(Sender<Option<Monitor>>, f64, f64),
-  AvailableMonitors(Sender<Vec<Monitor>>),
+  PrimaryMonitor(Sender<Result<Option<Monitor>>>),
+  MonitorFromPoint(Sender<Result<Option<Monitor>>>, f64, f64),
+  AvailableMonitors(Sender<Result<Vec<Monitor>>>),
   CursorPosition(Sender<Result<PhysicalPosition<f64>>>),
   DisplayHandle(Sender<std::result::Result<SendRawDisplayHandle, raw_window_handle::HandleError>>),
   #[cfg(target_os = "macos")]
@@ -412,38 +454,7 @@ pub(crate) struct WinitCefApp<T: UserEvent> {
   receiver: Receiver<Message<T>>,
   pub(crate) state: AppState<T>,
   pub(crate) scheme_registry: request_handler::SchemeRegistry,
-  /// Exit code from `RequestExit`, read back by `Runtime::run_return` after
-  /// the event loop finishes (winit's `run_app` return carries no code).
-  exit_code: Arc<std::sync::atomic::AtomicI32>,
-  #[cfg(any(
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd"
-  ))]
-  last_focus_probe: Option<std::time::Instant>,
 }
-
-/// Stands in for the scheduling callbacks `external_message_pump` would provide.
-#[cfg(any(
-  target_os = "linux",
-  target_os = "dragonfly",
-  target_os = "freebsd",
-  target_os = "netbsd",
-  target_os = "openbsd"
-))]
-const CEF_WORK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(4);
-
-/// Probing costs blocking X round-trips and focus is not that time-sensitive.
-#[cfg(any(
-  target_os = "linux",
-  target_os = "dragonfly",
-  target_os = "freebsd",
-  target_os = "netbsd",
-  target_os = "openbsd"
-))]
-const FOCUS_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl<T: UserEvent> WinitCefApp<T> {
   fn new(
@@ -451,7 +462,6 @@ impl<T: UserEvent> WinitCefApp<T> {
     receiver: Receiver<Message<T>>,
     callback: Box<dyn FnMut(RunEvent<T>)>,
     scheme_registry: request_handler::SchemeRegistry,
-    exit_code: Arc<std::sync::atomic::AtomicI32>,
   ) -> Self {
     Self {
       context,
@@ -464,15 +474,6 @@ impl<T: UserEvent> WinitCefApp<T> {
         exiting: false,
       },
       scheme_registry,
-      exit_code,
-      #[cfg(any(
-        target_os = "linux",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd"
-      ))]
-      last_focus_probe: None,
     }
   }
 
@@ -484,18 +485,18 @@ impl<T: UserEvent> WinitCefApp<T> {
     &mut self,
     event_loop: &dyn ActiveEventLoop,
   ) -> MainThreadDispatchGuard<T> {
-    unsafe fn handle<T: UserEvent>(
-      app: *mut (),
-      event_loop: &dyn ActiveEventLoop,
-      message: Message<T>,
-    ) {
-      unsafe { &mut *app.cast::<WinitCefApp<T>>() }.handle_message(event_loop, message);
-    }
+    let mut dispatch = Box::new(MainThreadDispatch {
+      app: self as *mut _,
+      event_loop: event_loop as *const _,
+    });
 
-    let app = (self as *mut Self).cast();
-    self
-      .context
-      .install_current_dispatch(app, handle::<T>, event_loop)
+    let previous = self.context.current_dispatch.install(dispatch.as_mut());
+
+    MainThreadDispatchGuard {
+      context: self.context.clone(),
+      dispatch,
+      previous,
+    }
   }
 
   fn drain_messages(&mut self, event_loop: &dyn ActiveEventLoop) {
@@ -518,19 +519,55 @@ impl<T: UserEvent> WinitCefApp<T> {
         // window rather than trusting the message's window_id — otherwise a
         // reparented webview's scheme-handler entries would leak and its
         // AppWebview would linger in the target window forever.
-        let child = self.state.windows.values_mut().find_map(|appwindow| {
+        let closed = self.state.windows.iter_mut().find_map(|(id, appwindow)| {
           appwindow
             .children
             .iter()
             .position(|child| child.webview_id == webview_id)
-            .map(|index| appwindow.children.remove(index))
+            .map(|index| {
+              let child = appwindow.children.remove(index);
+              (*id, child, appwindow.children.is_empty())
+            })
         });
-        if let Some(child) = child {
+
+        let mut emptied_window = None;
+        if let Some((window_id, child, was_last)) = closed {
           self.remove_scheme_handler_entries(&child);
+          if was_last {
+            emptied_window = Some(window_id);
+          }
         }
 
         self.state.live_browsers = self.state.live_browsers.saturating_sub(1);
-        self.exit_if_done(event_loop);
+
+        // A window that just lost its last webview has nothing left to show, so
+        // it follows the webview out through the regular close path — listeners
+        // still get `CloseRequested` and can keep the empty window around.
+        // `close_window` runs the exit check itself.
+        if let Some(window_id) = emptied_window {
+          self.request_window_close(window_id, event_loop);
+        } else {
+          self.exit_if_done(event_loop);
+        }
+      }
+      #[cfg(any(target_os = "macos", windows))]
+      Message::DestroyWebviewHostWindow(webview_id) => {
+        // Destroying the browser's own child view/window is what completes the
+        // close CEF handed over in `do_close`; CEF acknowledges it with
+        // `BrowserClosed`, which is where the bookkeeping is dropped. Same
+        // reasoning as there for searching every window by webview id.
+        //
+        // A webview that is already gone from state means its window is being
+        // torn down, and that teardown destroys the child view anyway.
+        if let Some(child) = self
+          .state
+          .windows
+          .values()
+          .flat_map(|appwindow| appwindow.children.iter())
+          .find(|child| child.webview_id == webview_id)
+        {
+          child.destroy_host_window();
+        }
       }
       Message::CreateWindow {
         window_id,
@@ -564,6 +601,9 @@ impl<T: UserEvent> WinitCefApp<T> {
         webview_id,
         message,
       } => self.handle_webview_message(window_id, webview_id, message),
+      Message::NavigateFirstWebview { window_id, url } => {
+        self.navigate_first_webview(window_id, &url)
+      }
       Message::DragDropScriptEvent {
         window_id,
         webview_id,
@@ -578,21 +618,11 @@ impl<T: UserEvent> WinitCefApp<T> {
       Message::Task(task) => task(),
       Message::RequestExit(code) => {
         if self.request_exit(Some(code)) {
-          self.exit_code.store(code, Ordering::Release);
           self.close_all_browsers();
           self.exit_if_done(event_loop);
         }
       }
-      // Published tauri-runtime only has RunEvent::Opened on macOS/iOS/
-      // Android; elsewhere the deep-link relaunch event has nowhere to go.
-      #[cfg(target_os = "macos")]
       Message::Opened(urls) => self.run_callback(RunEvent::Opened { urls }),
-      #[cfg(not(target_os = "macos"))]
-      Message::Opened(urls) => {
-        log::warn!(
-          "dropping deep-link open event {urls:?}: no RunEvent::Opened on this platform in published tauri-runtime"
-        );
-      }
       #[cfg(target_os = "macos")]
       Message::Reopen {
         has_visible_windows,
@@ -621,19 +651,19 @@ impl<T: UserEvent> WinitCefApp<T> {
         let monitor = event_loop
           .primary_monitor()
           .map(|monitor| winit_monitor_to_tauri_monitor(&monitor));
-        let _ = tx.send(monitor);
+        let _ = tx.send(Ok(monitor));
       }
       EventLoopMessage::MonitorFromPoint(tx, x, y) => {
         let monitor = find_monitor_from_point(event_loop.available_monitors(), x, y)
           .map(|monitor| winit_monitor_to_tauri_monitor(&monitor));
-        let _ = tx.send(monitor);
+        let _ = tx.send(Ok(monitor));
       }
       EventLoopMessage::AvailableMonitors(tx) => {
         let monitors = event_loop
           .available_monitors()
           .map(|monitor| winit_monitor_to_tauri_monitor(&monitor))
           .collect();
-        let _ = tx.send(monitors);
+        let _ = tx.send(Ok(monitors));
       }
       EventLoopMessage::SetDeviceEventFilter(filter) => {
         event_loop.listen_device_events(device_event_filter_to_winit(filter));
@@ -682,65 +712,6 @@ impl<T: UserEvent> WinitCefApp<T> {
       browser_client::DragDropEventTarget::Webview => {
         self.emit_webview_event(window_id, webview_id, WebviewEvent::DragDrop(event));
       }
-    }
-  }
-
-  /// The browser child window owns the X11 input focus while the app is focused,
-  /// which X11 reports to the top-level as `FocusOut`/`NotifyInferior`. winit
-  /// does not filter that detail, so its focus state alone is not usable.
-  fn sync_window_focus(&mut self, window_id: WindowId) {
-    let Some(appwindow) = self.state.windows.get_mut(&window_id) else {
-      return;
-    };
-
-    let focused = appwindow.window.has_focus() || appwindow.owns_input_focus();
-    if focused == appwindow.reported_focus {
-      return;
-    }
-    appwindow.reported_focus = focused;
-
-    for child in &appwindow.children {
-      child.host.set_focus(i32::from(focused));
-    }
-    if focused {
-      if let Some(child) = appwindow.children.first() {
-        child.take_input_focus();
-      }
-    }
-
-    self.emit_window_event(window_id, WindowEvent::Focused(focused));
-  }
-
-  /// winit already considers the top-level unfocused once the browser child holds
-  /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
-  fn sync_delegated_focus(&mut self) {
-    #[cfg(any(
-      target_os = "linux",
-      target_os = "dragonfly",
-      target_os = "freebsd",
-      target_os = "netbsd",
-      target_os = "openbsd"
-    ))]
-    {
-      let now = std::time::Instant::now();
-      if let Some(last) = self.last_focus_probe
-        && now.duration_since(last) < FOCUS_PROBE_INTERVAL
-      {
-        return;
-      }
-      self.last_focus_probe = Some(now);
-    }
-
-    let delegated = self
-      .state
-      .windows
-      .iter()
-      .filter(|(_, appwindow)| appwindow.reported_focus && !appwindow.window.has_focus())
-      .map(|(window_id, _)| *window_id)
-      .collect::<Vec<_>>();
-
-    for window_id in delegated {
-      self.sync_window_focus(window_id);
     }
   }
 
@@ -809,18 +780,6 @@ impl<T: UserEvent> WinitCefApp<T> {
   }
 
   pub(crate) fn close_window(&mut self, window_id: WindowId, event_loop: &dyn ActiveEventLoop) {
-    if !self.state.windows.contains_key(&window_id) {
-      return;
-    }
-    // Emit Destroyed while the window is still in state (emit_window_event
-    // needs it): tauri's core prunes its window registry on this event, and
-    // app close hooks rely on it. Without it every closed window lives on as
-    // a zombie label — get_webview_window keeps returning a dead handle. The
-    // winit Destroyed event can't cover this: by the time it fires the id
-    // mapping below is already gone, so it never routes back to this window.
-    if !self.state.exiting {
-      self.emit_window_event(window_id, WindowEvent::Destroyed);
-    }
     let Some(appwindow) = self.state.windows.remove(&window_id) else {
       return;
     };
@@ -875,6 +834,20 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 
+  fn navigate_first_webview(&self, window_id: WindowId, url: &str) {
+    let Some(frame) = self
+      .state
+      .windows
+      .get(&window_id)
+      .and_then(|window| window.children.first())
+      .and_then(|webview| webview.browser.main_frame())
+    else {
+      return;
+    };
+
+    frame.load_url(Some(&CefString::from(url)));
+  }
+
   fn close_all_browsers(&mut self) {
     // App shutdown follows the same eager bookkeeping cleanup as window
     // teardown. live_browsers keeps the loop alive until CEF confirms every
@@ -914,10 +887,10 @@ impl<T: UserEvent> WinitCefApp<T> {
     }
   }
 
-  /// Without `external_message_pump` nothing tells us when Chromium has work, so
-  /// poll it. The GLib iteration only covers GTK work CEF schedules itself:
-  /// `MessagePumpGlib`'s sources return early unless the pump is inside `Run()`,
-  /// which only `do_message_loop_work` enters.
+  /// Service the default GLib main context so the external message pump's GLib
+  /// source (and any GTK work CEF schedules) gets dispatched, then arm winit to
+  /// wake when the next GLib pump deadline is due. Windows/macOS need no
+  /// equivalent: their pump timers live on the native loop winit already runs.
   #[cfg(any(
     target_os = "linux",
     target_os = "dragonfly",
@@ -930,11 +903,9 @@ impl<T: UserEvent> WinitCefApp<T> {
     while context.pending() {
       context.iteration(false);
     }
-
-    cef::do_message_loop_work();
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-      std::time::Instant::now() + CEF_WORK_INTERVAL,
-    ));
+    if let Some(deadline) = self.context.cef_pump.next_deadline() {
+      event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(deadline));
+    }
   }
 }
 
@@ -973,7 +944,6 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
       target_os = "openbsd"
     ))]
     self.service_glib(event_loop);
-    self.sync_delegated_focus();
     self.run_callback(RunEvent::MainEventsCleared);
   }
 
@@ -995,8 +965,9 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
       WinitWindowEvent::CloseRequested => self.request_window_close(window_id, event_loop),
 
       WinitWindowEvent::Destroyed => {
-        // close_window emits WindowEvent::Destroyed (exactly once — a window
-        // that already went through close_window no longer routes here).
+        if !self.state.exiting {
+          self.emit_window_event(window_id, WindowEvent::Destroyed);
+        }
         self.close_window(window_id, event_loop);
       }
       WinitWindowEvent::SurfaceResized(size) => {
@@ -1025,11 +996,18 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
           WindowEvent::Moved(PhysicalPosition::new(pos.x, pos.y)),
         );
       }
-      WinitWindowEvent::Focused(_) => self.sync_window_focus(window_id),
+      WinitWindowEvent::Focused(focused) => {
+        self.emit_window_event(window_id, WindowEvent::Focused(focused));
+      }
       WinitWindowEvent::ThemeChanged(theme) => {
         let system_theme = winit_theme_to_tauri_theme(theme);
         if let Some(explicit_theme) = appwindow.preferred_theme() {
           appwindow.set_theme(Some(explicit_theme));
+        } else {
+          // Following the system: the appearance changed without going through
+          // `set_theme`, so the titlebar rebuild still has to be undone.
+          #[cfg(target_os = "macos")]
+          appwindow.reapply_traffic_light_position_after_appearance_change();
         }
         self.emit_window_event(window_id, WindowEvent::ThemeChanged(system_theme));
       }
@@ -1057,26 +1035,6 @@ impl<T: UserEvent> ApplicationHandler for WinitCefApp<T> {
   }
 }
 
-/// Registers the config-listed tauri custom protocol schemes with Chromium.
-///
-/// Published tauri serves custom protocols at their native URL forms on
-/// Linux/macOS (`tauri://localhost`, `ipc://localhost`, `asset://localhost`),
-/// so Chromium must know each scheme as standard (URLs get an origin and
-/// relative resolution), secure (secure-context APIs like WebCodecs and
-/// getUserMedia work), CORS-enabled and fetch-enabled (the IPC transport is a
-/// `fetch` POST to `ipc://localhost/<cmd>`). Runs in every CEF process — the
-/// helper re-exec path registers the same set via `TauriCefHelperApp`.
-fn register_tauri_schemes(registrar: Option<&mut SchemeRegistrar>) {
-  let Some(registrar) = registrar else { return };
-  let options = sys::cef_scheme_options_t::CEF_SCHEME_OPTION_STANDARD as i32
-    | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_SECURE as i32
-    | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_CORS_ENABLED as i32
-    | sys::cef_scheme_options_t::CEF_SCHEME_OPTION_FETCH_ENABLED as i32;
-  for scheme in &crate::config::config().custom_schemes {
-    registrar.add_custom_scheme(Some(&CefString::from(scheme.as_str())), options);
-  }
-}
-
 wrap_app! {
   struct TauriCefApp<T: UserEvent> {
     context: RuntimeContext<T>,
@@ -1086,10 +1044,6 @@ wrap_app! {
   }
 
   impl App {
-    fn on_register_custom_schemes(&self, registrar: Option<&mut SchemeRegistrar>) {
-      register_tauri_schemes(registrar);
-    }
-
     fn render_process_handler(&self) -> Option<RenderProcessHandler> {
       Some(ipc::TauriRenderProcessHandler::new())
     }
@@ -1125,63 +1079,6 @@ wrap_app! {
   }
 }
 
-/// Returns the pid of a verifiably-alive process holding this cache's
-/// Chromium `SingletonLock`, if any. The lock is a symlink to
-/// `<hostname>-<pid>`; a stale lock (dead pid, or another host on a shared
-/// home) is ignored — Chromium recovers those itself.
-fn live_singleton_lock_holder(cache_path: &std::path::Path) -> Option<u32> {
-  let target = std::fs::read_link(cache_path.join("SingletonLock")).ok()?;
-  let target = target.to_string_lossy();
-  let (host, pid) = target.rsplit_once('-')?;
-  let pid: u32 = pid.parse().ok()?;
-  let our_host = std::fs::read_to_string("/proc/sys/kernel/hostname")
-    .map(|h| h.trim().to_string())
-    .unwrap_or_default();
-  if !our_host.is_empty() && host != our_host {
-    return None;
-  }
-  #[cfg(target_os = "linux")]
-  let held = is_other_instance(pid);
-  #[cfg(not(target_os = "linux"))]
-  let held = pid != std::process::id()
-    && std::process::Command::new("kill")
-      .args(["-0", &pid.to_string()])
-      .status()
-      .map(|s| s.success())
-      .unwrap_or(false);
-  held.then_some(pid)
-}
-
-#[cfg(target_os = "linux")]
-fn is_other_instance(pid: u32) -> bool {
-  let Ok(their_exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
-    return false;
-  };
-  if std::fs::read_link("/proc/self/exe").ok() != Some(their_exe) {
-    return false;
-  }
-  let mut current = std::process::id();
-  while current > 1 {
-    if current == pid {
-      return false;
-    }
-    match parent_pid(current) {
-      Some(parent) => current = parent,
-      None => break,
-    }
-  }
-  true
-}
-
-#[cfg(target_os = "linux")]
-fn parent_pid(pid: u32) -> Option<u32> {
-  std::fs::read_to_string(format!("/proc/{pid}/status"))
-    .ok()?
-    .lines()
-    .find_map(|line| line.strip_prefix("PPid:"))
-    .and_then(|value| value.trim().parse().ok())
-}
-
 pub fn run_cef_helper_process() {
   let args = cef::args::Args::new();
 
@@ -1212,10 +1109,6 @@ wrap_app! {
   struct TauriCefHelperApp;
 
   impl App {
-    fn on_register_custom_schemes(&self, registrar: Option<&mut SchemeRegistrar>) {
-      register_tauri_schemes(registrar);
-    }
-
     fn render_process_handler(&self) -> Option<RenderProcessHandler> {
       Some(ipc::TauriRenderProcessHandler::new())
     }
@@ -1285,24 +1178,22 @@ impl<T: UserEvent> RuntimeHandle<T> for CefRuntimeHandle<T> {
     Ok(unsafe { DisplayHandle::borrow_raw(raw.0) })
   }
 
-  fn primary_monitor(&self) -> Option<Monitor> {
-    event_loop_getter!(self, PrimaryMonitor).ok().flatten()
+  fn primary_monitor(&self) -> Result<Option<Monitor>> {
+    event_loop_getter!(self, PrimaryMonitor)?
   }
 
-  fn monitor_from_point(&self, x: f64, y: f64) -> Option<Monitor> {
+  fn monitor_from_point(&self, x: f64, y: f64) -> Result<Option<Monitor>> {
     let (tx, rx) = mpsc::channel();
     self
       .context
       .send_message(Message::EventLoop(EventLoopMessage::MonitorFromPoint(
         tx, x, y,
-      )))
-      .and_then(|_| rx.recv().map_err(|_| Error::FailedToReceiveMessage))
-      .ok()
-      .flatten()
+      )))?;
+    rx.recv().map_err(|_| Error::FailedToReceiveMessage)?
   }
 
-  fn available_monitors(&self) -> Vec<Monitor> {
-    event_loop_getter!(self, AvailableMonitors).unwrap_or_default()
+  fn available_monitors(&self) -> Result<Vec<Monitor>> {
+    event_loop_getter!(self, AvailableMonitors)?
   }
 
   fn cursor_position(&self) -> Result<PhysicalPosition<f64>> {
@@ -1433,7 +1324,7 @@ impl TerminationSignals {
 impl<T: UserEvent> CefRuntime<T> {
   fn init(
     mut event_loop_builder: EventLoopBuilder,
-    #[allow(unused_variables)] runtime_args: RuntimeInitArgs,
+    runtime_args: RuntimeInitArgs<RuntimeInitAttribute>,
   ) -> Result<Self> {
     // Snapshot before CEF can touch anything, so we can tell an embedder's own
     // signal policy apart from the handlers CEF installs in `cef::initialize`.
@@ -1479,7 +1370,14 @@ impl<T: UserEvent> CefRuntime<T> {
     // The CEF API version table must be initialized before any other CEF call
     // (e.g. `args.as_cmd_line()` below), otherwise the process crashes with no
     // diagnostics.
-    let _ = cef::api_hash(sys::CEF_API_VERSION_LAST, 0);
+    let mut pl_attrs = runtime_args.platform_specific_attributes.iter();
+    let version = pl_attrs
+      .find_map(|attribute| match attribute {
+        RuntimeInitAttribute::ApiVersion { version } => Some(*version),
+        _ => None,
+      })
+      .unwrap_or(sys::CEF_API_VERSION_LAST);
+    let _ = cef::api_hash(version, 0);
 
     // Handle CEF subprocesses (renderer/GPU/utility) before any browser-only
     // setup such as building the event loop, creating cache directories, or the
@@ -1502,51 +1400,28 @@ impl<T: UserEvent> CefRuntime<T> {
       std::process::exit(ret.max(0));
     }
 
-    // Published tauri's RuntimeInitArgs has no channel for CEF-specific init
-    // data (identifier/switches/cache path), so it comes from the
-    // process-global crate config instead — see `crate::configure`.
-    let cef_config = crate::config::config();
-    let mut command_line_args = cef_config.command_line_args.clone();
-    let deep_link_schemes = cef_config.deep_link_schemes.clone();
+    let mut command_line_args = Vec::new();
+    let mut deep_link_schemes = Vec::new();
+    let mut cache_path_override = None::<PathBuf>;
+    for arg in runtime_args.platform_specific_attributes {
+      match arg {
+        RuntimeInitAttribute::CommandLineArgs { args } => command_line_args.extend(args),
+        RuntimeInitAttribute::DeepLinkSchemes { schemes } => deep_link_schemes.extend(schemes),
+        RuntimeInitAttribute::CachePath { path } => cache_path_override = Some(path),
+        // Already applied, above, before the first CEF call.
+        RuntimeInitAttribute::ApiVersion { .. } => {}
+      }
+    }
 
-    // Once the GPU mode fallback list is exhausted Chromium kills the browser
-    // process with a `LOG(FATAL)`, seen as a bare "Illegal instruction" with no
-    // panic and no log. Suspend/resume GPU resets get there on their own.
-    // See `GpuDataManagerImplPrivate::FallBackToNextGpuMode`.
-    command_line_args.push(("disable-gpu-process-crash-limit".to_string(), None));
-
-    let cache_path = cef_config.cache_path.clone().unwrap_or_else(|| {
+    let cache_path = cache_path_override.unwrap_or_else(|| {
       let cache_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-      cache_base.join(&cef_config.identifier).join("cef")
+      cache_base.join(&runtime_args.identifier).join("cef")
     });
     let _ = create_dir_all(&cache_path);
 
-    // Chromium guards its profile with a `SingletonLock` symlink whose target
-    // is `<hostname>-<pid>`. A second browser process on the same cache dir
-    // doesn't fail at initialize — Chromium only surfaces the conflict later,
-    // as a renderer/GPU startup failure. Fail fast with an actionable error
-    // instead when the holder is verifiably alive.
-    if let Some(holder_pid) = live_singleton_lock_holder(&cache_path) {
-      return Err(Error::CreateWebview(
-        format!(
-          "CEF cache {} is held by running process {holder_pid} (SingletonLock); \
-           close that instance or configure a distinct cache_path/identifier",
-          cache_path.display()
-        )
-        .into(),
-      ));
-    }
-
-    #[cfg(target_os = "linux")]
-    if crate::config::native_wayland() {
-      command_line_args.push(("ozone-platform".into(), Some("wayland".into())));
-      event_loop_builder.with_wayland();
-    } else {
-      command_line_args.push(("ozone-platform".into(), Some("x11".into())));
-      event_loop_builder.with_x11();
-    }
-
+    // Force X11 usage on Linux
     #[cfg(any(
+      target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "netbsd",
@@ -1587,6 +1462,7 @@ impl<T: UserEvent> CefRuntime<T> {
       cache_path: Arc::new(cache_path.clone()),
     };
 
+    command_line_args.push(("--enable-media-stream".to_string(), None));
     let mut app = TauriCefApp::new(
       context.clone(),
       context_initialized.clone(),
@@ -1606,33 +1482,10 @@ impl<T: UserEvent> CefRuntime<T> {
       "CEF browser process unexpectedly returned from execute_process"
     );
 
-    // CEF's `MessagePumpExternal::Run` is a 10ms time slice with a no-op `Quit`,
-    // so nested run loops end immediately. HTML5 drag and native context menus
-    // both need one that lasts. Chromium's `MessagePumpGlib` is a real loop.
-    #[cfg(any(
-      target_os = "linux",
-      target_os = "dragonfly",
-      target_os = "freebsd",
-      target_os = "netbsd",
-      target_os = "openbsd"
-    ))]
-    const EXTERNAL_MESSAGE_PUMP: i32 = 0;
-    #[cfg(not(any(
-      target_os = "linux",
-      target_os = "dragonfly",
-      target_os = "freebsd",
-      target_os = "netbsd",
-      target_os = "openbsd"
-    )))]
-    const EXTERNAL_MESSAGE_PUMP: i32 = 1;
-
     let settings = cef::Settings {
       no_sandbox: !cfg!(feature = "sandbox") as i32,
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
-      external_message_pump: EXTERNAL_MESSAGE_PUMP,
-      // Comma-delimited; empty keeps CEF's http/https-only default. The
-      // defaults stay included because exclude_defaults is left 0.
-      cookieable_schemes_list: cef_config.cookieable_schemes.join(",").as_str().into(),
+      external_message_pump: 1,
       ..Default::default()
     };
     if cef::initialize(
@@ -1653,21 +1506,6 @@ impl<T: UserEvent> CefRuntime<T> {
       target_os = "netbsd"
     ))]
     pre_cef_signals.restore();
-
-    // Baseline for embedders that never touch GTK. One that calls `gtk_init`
-    // must call `install_x_error_handlers` again afterwards — GTK's X11 backend
-    // replaces the handler during init.
-    #[cfg(target_os = "linux")]
-    if !crate::config::native_wayland() {
-      crate::platform::linux::install_x_error_handlers();
-    }
-    #[cfg(any(
-      target_os = "dragonfly",
-      target_os = "freebsd",
-      target_os = "openbsd",
-      target_os = "netbsd"
-    ))]
-    crate::platform::linux::install_x_error_handlers();
 
     #[cfg(target_os = "macos")]
     let app_delegate = if !is_helper {
@@ -1720,8 +1558,12 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   type WebviewDispatcher = CefWebviewDispatcher<T>;
   type Handle = CefRuntimeHandle<T>;
   type EventLoopProxy = EventProxy<T>;
+  type PlatformSpecificWebviewAttribute = WebviewAtribute;
+  type Webview = Webview;
+  type PlatformSpecificInitAttribute = RuntimeInitAttribute;
+  type WindowOpener = NewWindowOpener;
 
-  fn new(args: RuntimeInitArgs) -> Result<Self> {
+  fn new(args: RuntimeInitArgs<Self::PlatformSpecificInitAttribute>) -> Result<Self> {
     Self::init(EventLoopBuilder::default(), args)
   }
 
@@ -1733,15 +1575,8 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn new_any_thread(args: RuntimeInitArgs) -> Result<Self> {
+  fn new_any_thread(args: RuntimeInitArgs<Self::PlatformSpecificInitAttribute>) -> Result<Self> {
     let mut event_loop_builder = EventLoopBuilder::default();
-    #[cfg(target_os = "linux")]
-    if crate::config::native_wayland() {
-      EventLoopBuilderExtWayland::with_any_thread(&mut event_loop_builder, true);
-    } else {
-      EventLoopBuilderExtX11::with_any_thread(&mut event_loop_builder, true);
-    }
-    #[cfg(not(target_os = "linux"))]
     event_loop_builder.with_any_thread(true);
     Self::init(event_loop_builder, args)
   }
@@ -1775,7 +1610,10 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   }
 
   fn primary_monitor(&self) -> Option<Monitor> {
-    event_loop_getter!(self, PrimaryMonitor).ok().flatten()
+    event_loop_getter!(self, PrimaryMonitor)
+      .flatten()
+      .ok()
+      .unwrap_or_default()
   }
 
   fn monitor_from_point(&self, x: f64, y: f64) -> Option<Monitor> {
@@ -1786,12 +1624,16 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
         tx, x, y,
       )))
       .and_then(|_| rx.recv().map_err(|_| Error::FailedToReceiveMessage))
+      .ok()?
       .ok()
-      .flatten()
+      .unwrap_or_default()
   }
 
   fn available_monitors(&self) -> Vec<Monitor> {
-    event_loop_getter!(self, AvailableMonitors).unwrap_or_default()
+    event_loop_getter!(self, AvailableMonitors)
+      .flatten()
+      .ok()
+      .unwrap_or_default()
   }
 
   fn cursor_position(&self) -> Result<PhysicalPosition<f64>> {
@@ -1833,6 +1675,13 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
       .listen_device_events(device_event_filter_to_winit(filter));
   }
 
+  fn custom_scheme_url(scheme: &str, https: bool) -> String {
+    format!(
+      "{}://{scheme}.localhost",
+      if https { "https" } else { "http" }
+    )
+  }
+
   fn run_iteration<F: FnMut(RunEvent<T>) + 'static>(&mut self, mut callback: F) {
     while let Ok(message) = self.receiver.try_recv() {
       if let Message::UserEvent(event) = message {
@@ -1844,106 +1693,19 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   }
 
   fn run_return<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) -> i32 {
-    let exit_code = Arc::new(std::sync::atomic::AtomicI32::new(0));
-    #[cfg(target_os = "linux")]
-    if crate::config::native_wayland() {
-      let app = crate::wayland::App::new(
-        self.context,
-        self.receiver,
-        Box::new(callback),
-        self.scheme_registry,
-        exit_code.clone(),
-      );
-      let _ = self.event_loop.run_app(app);
-      cef::shutdown();
-      return exit_code.load(Ordering::Acquire);
-    }
+    self.run(callback);
+    // TODO: return the exit code from the runtime, if possible. For now, always return 0
+    0
+  }
+
+  fn run<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) {
     let app = WinitCefApp::new(
       self.context,
       self.receiver,
       Box::new(callback),
       self.scheme_registry,
-      exit_code.clone(),
     );
     let _ = self.event_loop.run_app(app);
     cef::shutdown();
-    exit_code.load(Ordering::Acquire)
-  }
-
-  fn run<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) {
-    self.run_return(callback);
-  }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-  use super::live_singleton_lock_holder;
-  use std::process::{Child, Command, Stdio};
-
-  fn lock_dir(target: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(target, dir.path().join("SingletonLock")).unwrap();
-    dir
-  }
-
-  fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-      .unwrap()
-      .trim()
-      .to_string()
-  }
-
-  fn spawn_sibling() -> Child {
-    let child = Command::new(std::env::current_exe().unwrap())
-      .arg("sleeper_child")
-      .env("CEF_SINGLETON_LOCK_SLEEPER", "1")
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .spawn()
-      .unwrap();
-    for _ in 0..200 {
-      if std::fs::read_link(format!("/proc/{}/exe", child.id())).is_ok() {
-        break;
-      }
-      std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    child
-  }
-
-  #[test]
-  fn sleeper_child() {
-    if std::env::var_os("CEF_SINGLETON_LOCK_SLEEPER").is_some() {
-      std::thread::sleep(std::time::Duration::from_secs(10));
-    }
-  }
-
-  #[test]
-  fn lock_from_a_foreign_pid_namespace_is_ignored() {
-    let dir = lock_dir(&format!("{}-2", hostname()));
-    assert_eq!(live_singleton_lock_holder(dir.path()), None);
-  }
-
-  #[test]
-  fn our_own_pid_is_not_a_holder() {
-    let dir = lock_dir(&format!("{}-{}", hostname(), std::process::id()));
-    assert_eq!(live_singleton_lock_holder(dir.path()), None);
-  }
-
-  #[test]
-  fn a_lock_from_another_host_is_ignored() {
-    let dir = lock_dir(&format!("not-this-host-{}", std::process::id()));
-    assert_eq!(live_singleton_lock_holder(dir.path()), None);
-  }
-
-  #[test]
-  fn a_live_second_instance_is_reported() {
-    let mut sibling = spawn_sibling();
-    let dir = lock_dir(&format!("{}-{}", hostname(), sibling.id()));
-
-    let holder = live_singleton_lock_holder(dir.path());
-
-    let _ = sibling.kill();
-    let _ = sibling.wait();
-    assert_eq!(holder, Some(sibling.id()));
   }
 }

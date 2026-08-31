@@ -59,28 +59,6 @@ impl AppWebview {
     })
   }
 
-  /// Give the X11 keyboard focus to the browser's own window.
-  ///
-  /// Without it keys only arrive while the pointer is over the window, because
-  /// X11 routes them through the pointer window and Chromium treats a window
-  /// with neither focus nor pointer as inactive. Alloy does this in
-  /// `CefWindowX11::Focus`; Chrome-style child windows have no equivalent.
-  pub(crate) fn take_input_focus(&self) {
-    let xid = self.xid();
-
-    with_cef_display((), |xlib, display| unsafe {
-      // Focusing an unmapped window is a BadMatch; a hidden webview is unmapped.
-      let mut attributes: xlib::XWindowAttributes = std::mem::zeroed();
-      if (xlib.XGetWindowAttributes)(display, xid, &mut attributes) == 0
-        || attributes.map_state != xlib::IsViewable
-      {
-        return;
-      }
-
-      (xlib.XSetInputFocus)(display, xid, xlib::RevertToParent, xlib::CurrentTime);
-    });
-  }
-
   pub(crate) fn reparent(&self, parent: &AppWindow) {
     let xid = self.xid();
     let parent_xid = parent.xid();
@@ -124,14 +102,6 @@ impl AppWebview {
         );
         (xlib.XUnmapWindow)(display, xid);
       }
-    });
-  }
-
-  pub(crate) fn destroy_native(&self) {
-    let xid = self.xid();
-    with_cef_display((), |xlib, display| unsafe {
-      (xlib.XDestroyWindow)(display, xid);
-      (xlib.XFlush)(display);
     });
   }
 
