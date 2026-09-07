@@ -136,6 +136,10 @@ impl PlatformPump {
   pub(super) fn is_timer_pending(&self) -> bool {
     get_time_interval_milliseconds(self.source_state.delayed_work_time) > 0
   }
+
+  pub(super) fn deadline(&self) -> Option<Instant> {
+    self.source_state.delayed_work_time
+  }
 }
 
 impl Drop for PlatformPump {
@@ -219,15 +223,15 @@ unsafe fn handle_check(source_state: *mut SourceState) -> bool {
     if num_bytes < mem::size_of::<i64>() as isize {
       log::error!("error reading from the CEF message pump wakeup pipe");
     }
-    if num_bytes == mem::size_of::<i64>() as isize {
-      if let Some(state) = unsafe { (*source_state).state.upgrade() } {
-        state.on_schedule_work(delay_ms[0]);
-      }
+    if num_bytes == mem::size_of::<i64>() as isize
+      && let Some(state) = unsafe { (*source_state).state.upgrade() }
+    {
+      state.on_schedule_work(delay_ms[0]);
     }
-    if num_bytes == (mem::size_of::<i64>() * 2) as isize {
-      if let Some(state) = unsafe { (*source_state).state.upgrade() } {
-        state.on_schedule_work(delay_ms[1]);
-      }
+    if num_bytes == (mem::size_of::<i64>() * 2) as isize
+      && let Some(state) = unsafe { (*source_state).state.upgrade() }
+    {
+      state.on_schedule_work(delay_ms[1]);
     }
   }
 
