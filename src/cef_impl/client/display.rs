@@ -10,8 +10,8 @@ use crate::webview::INITIAL_LOAD_URL;
 
 wrap_display_handler! {
   pub struct TauriCefDisplayHandler {
-    document_title_changed_handler: Option<Arc<crate::compat::DocumentTitleChangedHandler>>,
-    address_changed_handler: Option<Arc<crate::compat::AddressChangedHandler>>,
+    document_title_changed_handler: Option<Arc<tauri_runtime::webview::DocumentTitleChangedHandler>>,
+    frame_event_handler: Option<Arc<crate::FrameEventHandler>>,
   }
 
   impl DisplayHandler {
@@ -32,19 +32,10 @@ wrap_display_handler! {
 
     fn on_address_change(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       frame: Option<&mut Frame>,
       url: Option<&CefString>,
     ) {
-      // Only fire for main frame URL changes (matches on_before_browse behavior).
-      if let Some(frame) = frame
-        && frame.is_main() == 0
-      {
-        return;
-      }
-      let Some(handler) = &self.address_changed_handler else {
-        return;
-      };
       let Some(url) = url else {
         return;
       };
@@ -55,7 +46,12 @@ wrap_display_handler! {
       }
 
       if let Ok(url) = url::Url::parse(&url) {
-        handler(&url);
+        crate::frame::emit_frame_event(
+          &self.frame_event_handler,
+          browser,
+          frame,
+          crate::FrameEventKind::AddressChanged { url },
+        );
       }
     }
   }
