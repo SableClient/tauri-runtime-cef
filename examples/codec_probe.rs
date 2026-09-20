@@ -32,14 +32,19 @@ async function play(path, type) {
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   return new Promise((resolve) => {
     const video = document.createElement('video');
-    const done = (verdict) => { URL.revokeObjectURL(url); resolve(verdict); };
-    video.addEventListener('loadedmetadata', () =>
-      done('plays ' + video.videoWidth + 'x' + video.videoHeight));
+    let frames = 0;
+    const done = (verdict) => { URL.revokeObjectURL(url); video.remove(); resolve(verdict); };
+    video.addEventListener('ended', () =>
+      done('plays ' + video.videoWidth + 'x' + video.videoHeight + ' frames=' + frames));
     video.addEventListener('error', () =>
       done('error: ' + (video.error ? video.error.code + ' ' + video.error.message : 'unknown')));
-    setTimeout(() => done('timeout'), 15000);
-    video.preload = 'metadata';
+    setTimeout(() => done('timeout frames=' + frames + ' t=' + video.currentTime), 30000);
+    const tick = () => { frames += 1; video.requestVideoFrameCallback(tick); };
+    video.requestVideoFrameCallback(tick);
+    video.muted = true;
+    document.body.appendChild(video);
     video.src = url;
+    video.play().catch((e) => done('play rejected: ' + e));
   });
 }
 
