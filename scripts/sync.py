@@ -30,6 +30,7 @@ FORK_ROOT = Path(os.environ.get("FORK_ROOT", "."))
 REPORT = Path(os.environ.get("SYNC_REPORT", "/tmp/sync-report.md"))
 
 FORK_ONLY_PRESERVE = {
+    "examples/codec_probe.rs",
     "examples/stream_probe.rs",
     "examples/sw_probe.rs",
 }
