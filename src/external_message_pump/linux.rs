@@ -60,7 +60,7 @@ unsafe impl Send for PlatformPump {}
 
 impl PlatformPump {
   pub(super) fn new(state: Weak<PumpState>) -> Self {
-    // The runtime services callbacks from GLib's default MainContext.
+    // winit-gtk4 drives callbacks from GLib's default MainContext.
     let context = glib::MainContext::default();
 
     // Create our wakeup pipe, which is used to flag when work was scheduled.
@@ -219,15 +219,15 @@ unsafe fn handle_check(source_state: *mut SourceState) -> bool {
     if num_bytes < mem::size_of::<i64>() as isize {
       log::error!("error reading from the CEF message pump wakeup pipe");
     }
-    if num_bytes == mem::size_of::<i64>() as isize {
-      if let Some(state) = unsafe { (*source_state).state.upgrade() } {
-        state.on_schedule_work(delay_ms[0]);
-      }
+    if num_bytes == mem::size_of::<i64>() as isize
+      && let Some(state) = unsafe { (*source_state).state.upgrade() }
+    {
+      state.on_schedule_work(delay_ms[0]);
     }
-    if num_bytes == (mem::size_of::<i64>() * 2) as isize {
-      if let Some(state) = unsafe { (*source_state).state.upgrade() } {
-        state.on_schedule_work(delay_ms[1]);
-      }
+    if num_bytes == (mem::size_of::<i64>() * 2) as isize
+      && let Some(state) = unsafe { (*source_state).state.upgrade() }
+    {
+      state.on_schedule_work(delay_ms[1]);
     }
   }
 

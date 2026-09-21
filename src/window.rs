@@ -8,6 +8,7 @@ use std::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
   },
+  time::{Duration, Instant},
 };
 
 use cef::ImplBrowserHost;
@@ -30,13 +31,17 @@ use winit::{
   window::{Window as WinitWindow, WindowAttributes, WindowLevel},
 };
 
-#[cfg(target_os = "macos")]
-use crate::platform::macos::AppkitState;
 use crate::platform::{EventLoopExt, MonitorExt};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(
+  windows,
+  target_os = "macos",
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
 use std::marker::PhantomData;
-#[cfg(target_os = "macos")]
-use std::sync::RwLock;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowExtMacOS;
 #[cfg(windows)]
@@ -46,7 +51,10 @@ use winit::platform::windows::WindowExtWindows;
 use crate::window_handle::SoftbufferWindowHandle;
 use crate::{
   cef_impl::{client as browser_client, request_context},
-  runtime::{AfterWindowCreationCallback, CefRuntime, Message, RuntimeContext, WinitCefApp},
+  runtime::{
+    AfterWindowCreationCallback, CefRuntime, Message, RuntimeContext, WinitCefApp,
+    WinitDragDropState,
+  },
   webview::{AppWebview, CefWebviewDispatcher, create_webview_detached},
   window_builder::WindowBuilderWrapper,
   window_handle::SendRawWindowHandle,
@@ -54,6 +62,42 @@ use crate::{
 
 type WindowEventListener = Box<dyn Fn(&WindowEvent) + Send>;
 type WindowEventListeners = Arc<Mutex<HashMap<WindowEventId, WindowEventListener>>>;
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+pub(crate) struct SendGtkWindow(*mut std::ffi::c_void);
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+unsafe impl Send for SendGtkWindow {}
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+pub(crate) struct SendGtkBox(*mut std::ffi::c_void);
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+unsafe impl Send for SendGtkBox {}
 
 pub(crate) fn tauri_theme_to_winit_theme(theme: Option<Theme>) -> Option<winit::window::Theme> {
   theme.map(|theme| match theme {
@@ -214,9 +258,10 @@ fn prepare_window_attributes(event_loop: &dyn ActiveEventLoop, attrs: &mut AppWi
   }
 }
 
-pub(crate) fn paired_size_constraint(
+fn paired_size_constraint(
   width: Option<tauri_runtime::dpi::PixelUnit>,
   height: Option<tauri_runtime::dpi::PixelUnit>,
+  unconstrained: u32,
 ) -> Option<Size> {
   match (width, height) {
     (
@@ -233,8 +278,34 @@ pub(crate) fn paired_size_constraint(
       width.into(),
       height.into(),
     ))),
+    (Some(tauri_runtime::dpi::PixelUnit::Logical(width)), None) => Some(Size::Logical(
+      tauri_runtime::dpi::LogicalSize::new(width.into(), unconstrained as f64),
+    )),
+    (None, Some(tauri_runtime::dpi::PixelUnit::Logical(height))) => Some(Size::Logical(
+      tauri_runtime::dpi::LogicalSize::new(unconstrained as f64, height.into()),
+    )),
+    (Some(tauri_runtime::dpi::PixelUnit::Physical(width)), None) => Some(Size::Physical(
+      PhysicalSize::new(width.into(), unconstrained),
+    )),
+    (None, Some(tauri_runtime::dpi::PixelUnit::Physical(height))) => Some(Size::Physical(
+      PhysicalSize::new(unconstrained, height.into()),
+    )),
     _ => None,
   }
+}
+
+pub(crate) fn min_size_constraint(
+  width: Option<tauri_runtime::dpi::PixelUnit>,
+  height: Option<tauri_runtime::dpi::PixelUnit>,
+) -> Option<Size> {
+  paired_size_constraint(width, height, 0)
+}
+
+pub(crate) fn max_size_constraint(
+  width: Option<tauri_runtime::dpi::PixelUnit>,
+  height: Option<tauri_runtime::dpi::PixelUnit>,
+) -> Option<Size> {
+  paired_size_constraint(width, height, u32::MAX)
 }
 
 pub(crate) enum WindowMessage {
@@ -263,6 +334,22 @@ pub(crate) enum WindowMessage {
   PrimaryMonitor(Sender<Result<Option<Monitor>>>),
   MonitorFromPoint(Sender<Result<Option<Monitor>>>, f64, f64),
   AvailableMonitors(Sender<Result<Vec<Monitor>>>),
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  GtkWindow(Sender<Result<SendGtkWindow>>),
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  DefaultVBox(Sender<Result<SendGtkBox>>),
   RawWindowHandle(Sender<Result<SendRawWindowHandle>>),
   Theme(Sender<Result<Theme>>),
   Center,
@@ -319,7 +406,55 @@ pub(crate) enum WindowMessage {
 #[cfg(windows)]
 type SoftbufferSurface = softbuffer::Surface<SoftbufferWindowHandle, SoftbufferWindowHandle>;
 
+/// Opaque identity of one runtime-owned native window lifetime. Reparented
+/// webviews observe the destination token; same-label replacements never match.
+#[derive(Clone)]
+pub struct NativeWindowToken(Arc<()>);
+
+impl NativeWindowToken {
+  pub(crate) fn new() -> Self {
+    Self(Arc::new(()))
+  }
+}
+
+impl PartialEq for NativeWindowToken {
+  fn eq(&self, other: &Self) -> bool {
+    Arc::ptr_eq(&self.0, &other.0)
+  }
+}
+
+impl Eq for NativeWindowToken {}
+
+impl std::fmt::Debug for NativeWindowToken {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter
+      .debug_struct("NativeWindowToken")
+      .finish_non_exhaustive()
+  }
+}
+
+#[cfg(test)]
+mod native_window_identity_tests {
+  use super::NativeWindowToken;
+
+  #[test]
+  fn references_preserve_one_window_and_reject_replacements() {
+    let first = NativeWindowToken::new();
+    let retained_by_webview = first.clone();
+    assert_eq!(first, retained_by_webview);
+    let destination = NativeWindowToken::new();
+    assert_ne!(retained_by_webview, destination);
+    drop(first);
+    assert_ne!(retained_by_webview, NativeWindowToken::new());
+  }
+}
+
+/// How long to keep retrying the initial raise of a window created focused
+/// before assuming it is never going to be mapped.
+const PENDING_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) struct AppWindow {
+  pub(crate) lifetime: NativeWindowToken,
   #[allow(unused)]
   pub(crate) id: WindowId,
   pub(crate) label: String,
@@ -329,10 +464,21 @@ pub(crate) struct AppWindow {
   pub(crate) attrs: AppWindowAttrs,
   pub(crate) children: Vec<AppWebview>,
   pub(crate) listeners: WindowEventListeners,
-  /// Last focus state reported to Tauri. See `WinitCefApp::sync_window_focus`.
-  pub(crate) reported_focus: bool,
-  #[cfg(target_os = "macos")]
-  pub(crate) appkit_state: Arc<RwLock<AppkitState>>,
+  pub(crate) native_drag_drop: Option<WinitDragDropState>,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  /// X11 parent for CEF browser children, sized to the GTK content area so
+  /// GTK UI like menus stays outside the native CEF child-window stack.
+  pub(crate) cef_host: crate::platform::linux::CefX11Host,
+  /// Deadline for the initial raise of a window created focused, see
+  /// [`WinitCefApp::apply_pending_activations`]. `None` once it has been
+  /// raised or given up on.
+  pub(crate) pending_activation: Option<Instant>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -360,6 +506,16 @@ pub(crate) struct AppWindowAttrs {
     target_os = "openbsd"
   ))]
   pub(crate) skip_taskbar: bool,
+  /// Parent this window is transient for, owning the reference transferred by
+  /// [`WindowBuilder::transient_for`](tauri_runtime::window::WindowBuilder::transient_for).
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  pub(crate) transient_for: Option<gtk::Window>,
 }
 
 impl AppWindow {
@@ -387,6 +543,30 @@ impl AppWindow {
     self.window.set_outer_position(Position::Physical(position));
   }
 
+  /// Bring the window to the front and give it the input focus.
+  ///
+  /// `WinitWindow::focus_window` alone is not enough: on macOS it asks for
+  /// activation through the deprecated `activateIgnoringOtherApps:`, which
+  /// macOS 14+ ignores, and on X11 it asks the window manager to activate with
+  /// the "application" source indication, which focus-stealing prevention
+  /// routinely downgrades to a taskbar highlight. Both get a native nudge
+  /// first.
+  pub(crate) fn activate(&self) {
+    #[cfg(target_os = "macos")]
+    crate::platform::macos::activate_application();
+
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    self.raise_native();
+
+    self.window.focus_window();
+  }
+
   pub(crate) fn preferred_theme(&self) -> Option<Theme> {
     self
       .attrs
@@ -399,10 +579,37 @@ impl AppWindow {
     self.preferred_theme().or(app_wide_theme)
   }
 
+  /// Size available for CEF child layout. On Linux this is the GTK content-area
+  /// X11 host size, excluding GTK UI such as menus; elsewhere it is the window
+  /// surface size.
+  pub(crate) fn safe_surface_size(&self) -> PhysicalSize<u32> {
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    {
+      self.cef_host.size()
+    }
+
+    #[cfg(not(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    )))]
+    self.window.surface_size()
+  }
+
   pub(crate) fn set_theme(&mut self, theme: Option<Theme>) {
     self.attrs.inner.preferred_theme = tauri_theme_to_winit_theme(theme);
     self.window.set_theme(tauri_theme_to_winit_theme(theme));
     self.apply_cef_theme(theme);
+    #[cfg(target_os = "macos")]
+    self.reapply_traffic_light_position_after_appearance_change();
   }
 
   fn apply_cef_theme(&self, theme: Option<Theme>) {
@@ -433,8 +640,21 @@ impl<T: UserEvent> WinitCefApp<T> {
       .create_window(attrs.inner.clone())
       .map_err(|_| Error::CreateWindow)?;
 
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    let cef_host =
+      crate::platform::linux::CefX11Host::new(window.as_ref()).ok_or(Error::CreateWindow)?;
+
     let winit_id = window.id();
+    let pending_activation = (attrs.inner.active && attrs.inner.visible)
+      .then(|| Instant::now() + PENDING_ACTIVATION_TIMEOUT);
     let mut appwindow = AppWindow {
+      lifetime: NativeWindowToken::new(),
       id: window_id,
       label: pending.label.clone(),
       #[cfg(windows)]
@@ -443,14 +663,20 @@ impl<T: UserEvent> WinitCefApp<T> {
       attrs,
       children: Vec::new(),
       listeners: Default::default(),
-      reported_focus: false,
-      #[cfg(target_os = "macos")]
-      appkit_state: Arc::new(RwLock::new(AppkitState::default())),
+      native_drag_drop: None,
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      cef_host,
+      pending_activation,
     };
 
     #[cfg(target_os = "macos")]
     {
-      appwindow.associate_appkit_state();
       appwindow.set_visible_on_all_workspaces(appwindow.attrs.visible_on_all_workspaces);
       if let Some(position) = &appwindow.attrs.traffic_light_position {
         appwindow.set_traffic_light_position(position);
@@ -467,16 +693,41 @@ impl<T: UserEvent> WinitCefApp<T> {
     {
       appwindow.set_visible_on_all_workspaces(appwindow.attrs.visible_on_all_workspaces);
       appwindow.set_skip_taskbar(appwindow.attrs.skip_taskbar);
+      appwindow.apply_transient_for();
     }
 
     #[cfg(windows)]
-    if appwindow.attrs.inner.transparent || appwindow.attrs.background_color.is_some() {
-      appwindow.draw_background_surface();
-    }
+    appwindow.draw_background_surface();
 
     #[cfg(not(windows))]
     if appwindow.attrs.background_color.is_some() {
       appwindow.set_background_color(appwindow.attrs.background_color);
+    }
+
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    if let Some(after_window_creation) = _after_window_creation {
+      use gtk::glib::translate::ToGlibPtr;
+      use winit::platform::gtk4::WindowExtGtk4;
+
+      let gtk_window = appwindow.window.gtk_window().unwrap();
+      let default_vbox = appwindow.cef_host.default_vbox();
+      after_window_creation(RawWindow {
+        gtk_window: {
+          let ptr: *mut gtk::ffi::GtkApplicationWindow = gtk_window.to_glib_none().0;
+          ptr as *mut std::ffi::c_void
+        },
+        default_vbox: Some({
+          let ptr: *mut gtk::ffi::GtkBox = default_vbox.to_glib_none().0;
+          ptr as *mut std::ffi::c_void
+        }),
+        _marker: &PhantomData,
+      });
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -512,6 +763,63 @@ impl<T: UserEvent> WinitCefApp<T> {
     Ok(())
   }
 
+  /// Bring windows that were created focused to the front.
+  ///
+  /// winit applies [`WindowAttributes::active`] unevenly: X11 ignores it
+  /// outright, and on macOS/Windows it only orders the window front *within*
+  /// the application without pulling the process to the foreground. A window
+  /// created while another app owns the foreground - a terminal running
+  /// `tauri dev`, say - is then left buried behind it. Raising it ourselves
+  /// once it is on screen makes the initial activation deterministic.
+  ///
+  /// `focus_window` is a no-op while the backend still considers the window
+  /// unmapped (X11 only reports it visible once the server sends
+  /// `VisibilityNotify`, which lands after `create_window` returns), so keep
+  /// the request pending until winit reports the window visible, and drop it
+  /// after [`PENDING_ACTIVATION_TIMEOUT`] so a window that never maps does not
+  /// pop to the front minutes later.
+  pub(crate) fn apply_pending_activations(&mut self) {
+    let now = Instant::now();
+    for appwindow in self.state.windows.values_mut() {
+      let Some(deadline) = appwindow.pending_activation else {
+        continue;
+      };
+
+      if appwindow.window.is_visible() == Some(false) {
+        if now < deadline {
+          continue;
+        }
+        appwindow.pending_activation = None;
+        continue;
+      }
+
+      appwindow.activate();
+      appwindow.pending_activation = None;
+    }
+  }
+
+  /// Re-lays out the CEF children of every window whose X11 host was resized by GTK without the
+  /// toplevel changing size.
+  ///
+  /// GTK owns the content area, so attaching, hiding or showing a menu bar moves and resizes the
+  /// host while winit reports no `SurfaceResized` for the toplevel. Without this the children
+  /// would keep the bounds computed against the previous host size until the user resizes the
+  /// window.
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  pub(crate) fn apply_pending_host_layouts(&mut self) {
+    for appwindow in self.state.windows.values() {
+      if appwindow.cef_host.take_needs_relayout() {
+        crate::webview::layout_app_window(appwindow);
+      }
+    }
+  }
+
   pub(crate) fn handle_window_message(
     &mut self,
     event_loop: &dyn ActiveEventLoop,
@@ -540,9 +848,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::AddEventListener(id, listener) => {
         appwindow.listeners.lock().unwrap().insert(id, listener);
       }
-      WindowMessage::Close | WindowMessage::Destroy => {
-        unreachable!("handled before borrowing")
-      }
+      WindowMessage::Close | WindowMessage::Destroy => unreachable!("handled before borrowing"),
       WindowMessage::ScaleFactor(tx) => _ = tx.send(Ok(window.scale_factor())),
       WindowMessage::InnerSize(tx) => _ = tx.send(Ok(window.surface_size())),
       WindowMessage::OuterSize(tx) => _ = tx.send(Ok(window.outer_size())),
@@ -616,6 +922,35 @@ impl<T: UserEvent> WinitCefApp<T> {
           .collect();
         let _ = tx.send(Ok(monitors));
       }
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      WindowMessage::GtkWindow(tx) => {
+        use gtk::glib::translate::ToGlibPtr;
+        use winit::platform::gtk4::WindowExtGtk4;
+
+        let gtk_window = appwindow.window.gtk_window().unwrap();
+        let ptr: *mut gtk::ffi::GtkApplicationWindow = gtk_window.to_glib_full();
+        let _ = tx.send(Ok(SendGtkWindow(ptr as *mut std::ffi::c_void)));
+      }
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      WindowMessage::DefaultVBox(tx) => {
+        use gtk::glib::translate::ToGlibPtr;
+
+        let default_vbox = appwindow.cef_host.default_vbox();
+        let ptr: *mut gtk::ffi::GtkBox = default_vbox.to_glib_full();
+        let _ = tx.send(Ok(SendGtkBox(ptr as *mut std::ffi::c_void)));
+      }
       WindowMessage::RawWindowHandle(tx) => {
         let handle = window.window_handle();
         let send_handle = handle
@@ -660,7 +995,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::SetSimpleFullscreen(value) => {
         window.set_simple_fullscreen(value);
       }
-      WindowMessage::SetFocus => window.focus_window(),
+      WindowMessage::SetFocus => appwindow.activate(),
       WindowMessage::SetMinSize(min_size) => window.set_min_surface_size(min_size),
       WindowMessage::SetMaxSize(max_size) => window.set_max_surface_size(max_size),
       WindowMessage::SetMaximizable(value) => {
@@ -753,7 +1088,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::SetTrafficLightPosition(_position) => {
         #[cfg(target_os = "macos")]
         {
-          appwindow.attrs.traffic_light_position = Some(_position.clone());
+          appwindow.attrs.traffic_light_position = Some(_position);
           appwindow.set_traffic_light_position(&_position);
         }
       }
@@ -780,8 +1115,8 @@ impl<T: UserEvent> WinitCefApp<T> {
       }
       WindowMessage::SetSizeConstraints(constraints) => {
         // TODO: upstream individual width/height size constraints to winit.
-        let min_size = paired_size_constraint(constraints.min_width, constraints.min_height);
-        let max_size = paired_size_constraint(constraints.max_width, constraints.max_height);
+        let min_size = min_size_constraint(constraints.min_width, constraints.min_height);
+        let max_size = max_size_constraint(constraints.max_width, constraints.max_height);
         window.set_min_surface_size(min_size);
         window.set_max_surface_size(max_size);
       }
@@ -948,8 +1283,8 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn gtk_window(&self) -> Result<gtk::ApplicationWindow> {
-    Err(Error::FailedToSendMessage)
+  fn gtk_window(&self) -> Result<*mut std::ffi::c_void> {
+    window_getter!(self, GtkWindow).map(|gtk_window| gtk_window.0)
   }
 
   #[cfg(any(
@@ -959,8 +1294,8 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn default_vbox(&self) -> Result<gtk::Box> {
-    Err(Error::FailedToSendMessage)
+  fn default_vbox(&self) -> Result<*mut std::ffi::c_void> {
+    window_getter!(self, DefaultVBox).map(|gtk_box| gtk_box.0)
   }
 
   fn window_handle(
@@ -1211,7 +1546,7 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
   fn set_icon(&self, icon: Icon) -> Result<()> {
     self.context.send_message(Message::Window {
       window_id: self.window_id,
-      message: WindowMessage::SetIcon(crate::compat::icon_into_owned(icon)),
+      message: WindowMessage::SetIcon(icon.into_owned()),
     })
   }
 
@@ -1288,7 +1623,7 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
   fn set_overlay_icon(&self, icon: Option<Icon>) -> Result<()> {
     self.context.send_message(Message::Window {
       window_id: self.window_id,
-      message: WindowMessage::SetOverlayIcon(icon.map(crate::compat::icon_into_owned)),
+      message: WindowMessage::SetOverlayIcon(icon.map(Icon::into_owned)),
     })
   }
 
@@ -1339,16 +1674,17 @@ where
 {
   let label = pending.label.clone();
   let window_id = context.next_window_id();
-  let (webview_id, use_https_scheme) = pending
+  let (webview_id, use_https_scheme, devtools) = pending
     .webview
     .as_ref()
     .map(|w| {
       (
         Some(context.next_webview_id()),
         w.webview_attributes.use_https_scheme,
+        w.webview_attributes.devtools,
       )
     })
-    .unwrap_or((None, false));
+    .unwrap_or((None, false, None));
 
   let (result_tx, result_rx) = mpsc::channel();
   context.send_message(Message::CreateWindow {
@@ -1374,6 +1710,7 @@ where
       },
     },
     use_https_scheme,
+    devtools,
   });
 
   Ok(DetachedWindow {
