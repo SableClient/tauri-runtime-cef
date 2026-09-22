@@ -101,6 +101,7 @@ fn browser_settings_from_webview_attributes(
       .background_color
       .map(color_to_argb)
       .unwrap_or(0),
+    chrome_status_bubble: cef::State::from(cef::sys::cef_state_t::STATE_DISABLED),
     ..Default::default()
   }
 }

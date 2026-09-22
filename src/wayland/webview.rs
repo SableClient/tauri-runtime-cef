@@ -40,6 +40,7 @@ fn browser_settings(attrs: &WebviewAttributes) -> BrowserSettings {
     } else {
       sys::cef_state_t::STATE_DISABLED
     }),
+    chrome_status_bubble: State::from(sys::cef_state_t::STATE_DISABLED),
     ..Default::default()
   }
 }
