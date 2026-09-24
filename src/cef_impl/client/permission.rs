@@ -7,14 +7,22 @@
 //!
 //! Media-access requests use the same policy as Chromium permission prompts.
 //!
-//! Grants are also written back as content settings.
-//! `OnRequestMediaAccessPermission` bypasses Chromium's permission manager, so
-//! otherwise `enumerateDevices` still sees "not granted": it hides device
-//! labels and reports one placeholder per kind, and nothing is persisted.
+//! Grants are also written back as content settings and DevTools permission
+//! overrides. `OnRequestMediaAccessPermission` bypasses Chromium's permission
+//! manager, so otherwise `enumerateDevices` still sees "not granted": it hides
+//! device labels and reports one placeholder per kind. Content settings cannot
+//! hold a portless custom-scheme origin such as `tauri://localhost`.
+
+use std::sync::{
+  Arc, Mutex, PoisonError,
+  atomic::{AtomicI32, Ordering},
+};
 
 use cef::{rc::Rc as _, *};
 
 use crate::policy::{self, PermissionKind, RequestSource};
+
+static NEXT_OVERRIDE_DEVTOOLS_MESSAGE_ID: AtomicI32 = AtomicI32::new(2_000_000);
 
 wrap_permission_handler! {
   pub struct TauriCefPermissionHandler {
@@ -40,9 +48,8 @@ wrap_permission_handler! {
       let is_main_frame = frame.map(|frame| frame.is_main() != 0);
       let kinds = policy::media_kinds(requested_permissions);
 
-      let request_context = browser
-        .and_then(|browser| browser.host())
-        .and_then(|host| host.request_context());
+      let host = browser.and_then(|browser| browser.host());
+      let request_context = host.as_ref().and_then(|host| host.request_context());
       let content_types = media_content_types(&kinds);
 
       // A stored grant answers without asking the policy again.
@@ -57,6 +64,11 @@ wrap_permission_handler! {
         return 1;
       }
 
+      let permission_override = PermissionOverride {
+        host,
+        origin: origin.clone(),
+        names: override_names(&kinds),
+      };
       let grant_recorder = GrantRecorder {
         request_context,
         origin: origin.clone(),
@@ -72,6 +84,7 @@ wrap_permission_handler! {
         move |granted| {
           if granted {
             grant_recorder.record();
+            permission_override.apply();
           }
           callback.cont(if granted {
             requested_permissions
@@ -124,6 +137,17 @@ fn media_content_types(kinds: &[PermissionKind]) -> Vec<ContentSettingTypes> {
     .filter_map(|kind| match kind {
       PermissionKind::Microphone => Some(ContentSettingTypes::MEDIASTREAM_MIC),
       PermissionKind::Camera => Some(ContentSettingTypes::MEDIASTREAM_CAMERA),
+      _ => None,
+    })
+    .collect()
+}
+
+fn override_names(kinds: &[PermissionKind]) -> Vec<&'static str> {
+  kinds
+    .iter()
+    .filter_map(|kind| match kind {
+      PermissionKind::Microphone => Some("microphone"),
+      PermissionKind::Camera => Some("camera"),
       _ => None,
     })
     .collect()
@@ -196,5 +220,138 @@ wrap_task! {
     fn execute(&self) {
       record_grant(&self.request_context, &self.origin, &self.content_types);
     }
+  }
+}
+
+struct PermissionOverride {
+  host: Option<BrowserHost>,
+  origin: String,
+  names: Vec<&'static str>,
+}
+
+impl PermissionOverride {
+  fn apply(&self) {
+    let Some(host) = self.host.as_ref() else {
+      return;
+    };
+    if self.names.is_empty() || self.origin.is_empty() {
+      return;
+    }
+
+    if cef::currently_on(cef::sys::cef_thread_id_t::TID_UI.into()) != 0 {
+      apply_override(host, &self.origin, &self.names);
+      return;
+    }
+
+    let mut task = ApplyOverrideTask::new(host.clone(), self.origin.clone(), self.names.clone());
+    cef::post_task(cef::sys::cef_thread_id_t::TID_UI.into(), Some(&mut task));
+  }
+}
+
+fn next_override_message_id() -> i32 {
+  NEXT_OVERRIDE_DEVTOOLS_MESSAGE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn apply_override(host: &BrowserHost, origin: &str, names: &[&'static str]) {
+  let ids: Vec<i32> = names.iter().map(|_| next_override_message_id()).collect();
+  let pending = Arc::new(Mutex::new(ids.clone()));
+  let registration = Arc::new(Mutex::new(None));
+  let mut observer =
+    PermissionOverrideObserver::new(origin.to_owned(), pending.clone(), registration.clone());
+  let Some(observer_registration) = host.add_dev_tools_message_observer(Some(&mut observer)) else {
+    log::warn!("could not observe DevTools to override media permissions for {origin}");
+    return;
+  };
+  *registration.lock().unwrap_or_else(PoisonError::into_inner) = Some(observer_registration);
+
+  for (id, name) in ids.into_iter().zip(names) {
+    let message = serde_json::json!({
+      "id": id,
+      "method": "Browser.setPermission",
+      "params": {
+        "permission": { "name": name },
+        "setting": "granted",
+        "origin": origin,
+      },
+    })
+    .to_string();
+    if host.send_dev_tools_message(Some(message.as_bytes())) == 1 {
+      continue;
+    }
+    log::warn!("could not send the {name} permission override for {origin}");
+    settle(&pending, &registration, id);
+  }
+}
+
+fn settle(pending: &Mutex<Vec<i32>>, registration: &Mutex<Option<Registration>>, id: i32) -> bool {
+  let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+  let Some(index) = pending.iter().position(|pending_id| *pending_id == id) else {
+    return false;
+  };
+  pending.swap_remove(index);
+  if pending.is_empty() {
+    drop(pending);
+    let _ = registration
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .take();
+  }
+  true
+}
+
+wrap_dev_tools_message_observer! {
+  struct PermissionOverrideObserver {
+    origin: String,
+    pending: Arc<Mutex<Vec<i32>>>,
+    registration: Arc<Mutex<Option<Registration>>>,
+  }
+
+  impl DevToolsMessageObserver {
+    fn on_dev_tools_method_result(
+      &self,
+      _browser: Option<&mut Browser>,
+      message_id: ::std::os::raw::c_int,
+      success: ::std::os::raw::c_int,
+      result: Option<&[u8]>,
+    ) {
+      if settle(&self.pending, &self.registration, message_id) && success == 0 {
+        log::warn!(
+          "media permission override for {} failed: {}",
+          self.origin,
+          String::from_utf8_lossy(result.unwrap_or_default())
+        );
+      }
+    }
+  }
+}
+
+wrap_task! {
+  struct ApplyOverrideTask {
+    host: BrowserHost,
+    origin: String,
+    names: Vec<&'static str>,
+  }
+
+  impl Task {
+    fn execute(&self) {
+      apply_override(&self.host, &self.origin, &self.names);
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn overrides_only_device_capture() {
+    assert_eq!(
+      override_names(&[
+        PermissionKind::Microphone,
+        PermissionKind::Camera,
+        PermissionKind::ScreenCapture,
+      ]),
+      ["microphone", "camera"]
+    );
   }
 }
