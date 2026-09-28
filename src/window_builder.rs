@@ -18,7 +18,8 @@ use winit::{
 };
 
 use crate::window::{
-  AppWindowAttrs, paired_size_constraint, tauri_theme_to_winit_theme, winit_theme_to_tauri_theme,
+  AppWindowAttrs, max_size_constraint, min_size_constraint, tauri_theme_to_winit_theme,
+  winit_theme_to_tauri_theme,
 };
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -94,12 +95,20 @@ impl WindowBuilder for WindowBuilderWrapper {
     {
       builder = builder.transparent(config.transparent);
     }
-    if let (Some(min_width), Some(min_height)) = (config.min_width, config.min_height) {
-      builder = builder.min_inner_size(min_width, min_height);
+    let mut constraints = WindowSizeConstraints::default();
+    if let Some(min_width) = config.min_width {
+      constraints.min_width = Some(tauri_runtime::dpi::LogicalUnit::new(min_width).into());
     }
-    if let (Some(max_width), Some(max_height)) = (config.max_width, config.max_height) {
-      builder = builder.max_inner_size(max_width, max_height);
+    if let Some(min_height) = config.min_height {
+      constraints.min_height = Some(tauri_runtime::dpi::LogicalUnit::new(min_height).into());
     }
+    if let Some(max_width) = config.max_width {
+      constraints.max_width = Some(tauri_runtime::dpi::LogicalUnit::new(max_width).into());
+    }
+    if let Some(max_height) = config.max_height {
+      constraints.max_height = Some(tauri_runtime::dpi::LogicalUnit::new(max_height).into());
+    }
+    builder = builder.inner_size_constraints(constraints);
     if let Some(color) = config.background_color {
       builder = builder.background_color(color);
     }
@@ -179,11 +188,10 @@ impl WindowBuilder for WindowBuilderWrapper {
   }
 
   fn inner_size_constraints(mut self, constraints: WindowSizeConstraints) -> Self {
-    // TODO: upstream individual width/height size constraints to winit.
     self.attrs.inner.min_surface_size =
-      paired_size_constraint(constraints.min_width, constraints.min_height);
+      min_size_constraint(constraints.min_width, constraints.min_height);
     self.attrs.inner.max_surface_size =
-      paired_size_constraint(constraints.max_width, constraints.max_height);
+      max_size_constraint(constraints.max_width, constraints.max_height);
     self
   }
 
@@ -341,6 +349,9 @@ impl WindowBuilder for WindowBuilderWrapper {
       self.attrs.skip_taskbar = skip;
     }
 
+    #[cfg(target_os = "macos")]
+    let _skip = skip;
+
     self
   }
 
@@ -407,12 +418,28 @@ impl WindowBuilder for WindowBuilderWrapper {
 
   #[cfg(target_os = "macos")]
   fn parent(mut self, parent: *mut std::ffi::c_void) -> Self {
-    if let Some(ns_view) = NonNull::new(parent) {
-      let handle =
-        RawWindowHandle::AppKit(winit::raw_window_handle::AppKitWindowHandle::new(ns_view));
-      // SAFETY: Tauri passes a live parent NSView owned by the application.
-      self.attrs.inner = unsafe { self.attrs.inner.with_parent_window(Some(handle)) };
-    }
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSView, NSWindow};
+
+    let Some(nswindow) = NonNull::new(parent) else {
+      return self;
+    };
+    let Some(nswindow) = (unsafe { Retained::<NSWindow>::from_raw(nswindow.as_ptr() as _) }) else {
+      return self;
+    };
+
+    let Some(nsview) = nswindow.contentView() else {
+      return self;
+    };
+    let nsview = Retained::<NSView>::into_raw(nsview);
+    let Some(nsview) = NonNull::new(nsview as _) else {
+      return self;
+    };
+
+    let handle = winit::raw_window_handle::AppKitWindowHandle::new(nsview);
+    let handle = RawWindowHandle::AppKit(handle);
+    self.attrs.inner = unsafe { self.attrs.inner.with_parent_window(Some(handle)) };
+
     self
   }
 
@@ -423,7 +450,13 @@ impl WindowBuilder for WindowBuilderWrapper {
     target_os = "netbsd",
     target_os = "openbsd"
   ))]
-  fn transient_for(self, _parent: &impl gtk::glib::IsA<gtk::Window>) -> Self {
+  fn transient_for(mut self, parent: *mut std::ffi::c_void) -> Self {
+    use gtk::glib::translate::FromGlibPtrFull;
+
+    // SAFETY: `transient_for` receives the parent as transfer full, so the wrapper adopts the
+    // reference and releases it when the builder (or the window it creates) is dropped.
+    self.attrs.transient_for =
+      Some(unsafe { gtk::Window::from_glib_full(parent as *mut gtk::ffi::GtkWindow) });
     self
   }
 
@@ -495,6 +528,11 @@ impl WindowBuilder for WindowBuilderWrapper {
         .with_platform_attributes(Box::new(pl_attrs));
     }
 
+    self
+  }
+
+  // TODO
+  fn no_redirection_bitmap(#[allow(unused_mut)] mut self, _enable: bool) -> Self {
     self
   }
 
