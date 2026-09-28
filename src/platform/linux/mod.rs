@@ -9,4 +9,4 @@ mod utils;
 mod webview;
 mod window;
 
-pub use utils::install_x_error_handlers;
+pub(crate) use window::CefX11Host;
