@@ -1462,8 +1462,9 @@ fn devtools_initialization_script_source(
   const __TAURI_CEF_INIT_CUSTOM_PROTOCOL__ = {custom_protocol};
   const __TAURI_CEF_INIT_CUSTOM_DOMAINS__ = new Set({custom_domains});
   const __TAURI_CEF_INIT_IS_CUSTOM_PROTOCOL__ =
-    location.protocol === __TAURI_CEF_INIT_CUSTOM_PROTOCOL__
-    && __TAURI_CEF_INIT_CUSTOM_DOMAINS__.has(location.hostname);
+    (location.protocol === __TAURI_CEF_INIT_CUSTOM_PROTOCOL__
+      && __TAURI_CEF_INIT_CUSTOM_DOMAINS__.has(location.hostname))
+    || __TAURI_CEF_INIT_CUSTOM_DOMAINS__.has(location.protocol.slice(0, -1) + ".localhost");
   const __TAURI_CEF_INIT_IS_MAIN_FRAME__ = (() => {{
     try {{
       return window.top === window;
