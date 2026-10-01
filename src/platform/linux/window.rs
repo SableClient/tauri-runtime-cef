@@ -28,10 +28,9 @@ impl AppWindow {
     }
   }
 
-  /// Whether the X11 keyboard focus sits on this window or a descendant. Tells a
-  /// real focus loss apart from the `FocusOut`/`NotifyInferior` that
-  /// [`AppWebview::take_input_focus`] causes.
-  pub(crate) fn owns_input_focus(&self) -> bool {
+  /// Restore browser focus when X11 focus is on the parent window.
+  /// winit can miss transitions between the parent and browser child.
+  pub(crate) fn sync_input_focus(&self) -> bool {
     let xid = self.xid();
 
     super::utils::with_cef_display(false, |xlib, display| unsafe {
@@ -49,6 +48,11 @@ impl AppWindow {
       let mut current = focus;
       while current != 0 {
         if current == xid {
+          if focus == xid
+            && let Some(child) = self.children.first()
+          {
+            child.take_input_focus();
+          }
           return true;
         }
         current = parent_window(xlib, display, current);

@@ -98,6 +98,13 @@ How building against published tauri changes the mechanics, relative to the feat
 - macOS `.app` bundling needs the CEF framework + helper-app layout that feat/cef's tauri-cli produces; the published CLI doesn't do this. Bundle scripting lives with the consuming app for now.
 - Deep-link relaunch URLs are dropped on Linux/Windows (published `tauri-runtime` has no `RunEvent::Opened` there).
 
+## Native input test
+
+Run `node scripts/check-input-focus.mjs` with Node 22+, Xvfb, xdotool, and cached
+Rust dependencies. The test uses an isolated X11 display and a temporary profile.
+Set `CEF_PATH` to the unpacked CEF distribution if its libraries are not in the
+target's `debug` directory. `CARGO_TARGET_DIR` selects the build directory.
+
 ## License
 
 Apache-2.0 OR MIT, same as upstream Tauri. Original code Copyright 2019-2024 Tauri Programme within The Commons Conservancy; see `LICENSE_APACHE-2.0`, `LICENSE_MIT`, and `LICENSE.spdx`.

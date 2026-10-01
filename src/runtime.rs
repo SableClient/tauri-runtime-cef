@@ -693,7 +693,7 @@ impl<T: UserEvent> WinitCefApp<T> {
       return;
     };
 
-    let focused = appwindow.window.has_focus() || appwindow.owns_input_focus();
+    let focused = appwindow.sync_input_focus();
     if focused == appwindow.reported_focus {
       return;
     }
@@ -702,17 +702,10 @@ impl<T: UserEvent> WinitCefApp<T> {
     for child in &appwindow.children {
       child.host.set_focus(i32::from(focused));
     }
-    if focused {
-      if let Some(child) = appwindow.children.first() {
-        child.take_input_focus();
-      }
-    }
-
     self.emit_window_event(window_id, WindowEvent::Focused(focused));
   }
 
-  /// winit already considers the top-level unfocused once the browser child holds
-  /// the focus, so it drops the `FocusOut` for a real loss. The loop still wakes.
+  /// Poll native focus because winit can miss parent/child focus transitions.
   fn sync_delegated_focus(&mut self) {
     #[cfg(any(
       target_os = "linux",
@@ -731,15 +724,9 @@ impl<T: UserEvent> WinitCefApp<T> {
       self.last_focus_probe = Some(now);
     }
 
-    let delegated = self
-      .state
-      .windows
-      .iter()
-      .filter(|(_, appwindow)| appwindow.reported_focus && !appwindow.window.has_focus())
-      .map(|(window_id, _)| *window_id)
-      .collect::<Vec<_>>();
+    let windows = self.state.windows.keys().copied().collect::<Vec<_>>();
 
-    for window_id in delegated {
+    for window_id in windows {
       self.sync_window_focus(window_id);
     }
   }

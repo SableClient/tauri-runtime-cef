@@ -24,9 +24,8 @@ use crate::window::AppWindow;
 use super::{AppkitState, utils};
 
 impl AppWindow {
-  pub(crate) fn owns_input_focus(&self) -> bool {
-    let _ = self;
-    false
+  pub(crate) fn sync_input_focus(&self) -> bool {
+    self.window.has_focus()
   }
 
   pub(crate) fn raw_cef_handle(&self) -> cef::sys::cef_window_handle_t {
