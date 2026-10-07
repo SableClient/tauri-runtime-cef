@@ -291,6 +291,7 @@ pub(crate) enum WindowMessage {
   SetSizeConstraints(WindowSizeConstraints),
   SetPosition(Position),
   SetFullscreen(bool),
+  SetFullscreenOnMonitor(PhysicalPosition<f64>),
   #[cfg(target_os = "macos")]
   SetSimpleFullscreen(bool),
   SetFocus,
@@ -655,6 +656,13 @@ impl<T: UserEvent> WinitCefApp<T> {
       WindowMessage::SetPosition(position) => window.set_outer_position(position),
       WindowMessage::SetFullscreen(value) => {
         window.set_fullscreen(value.then_some(Fullscreen::Borderless(None)))
+      }
+      WindowMessage::SetFullscreenOnMonitor(position) => {
+        if let Some(monitor) =
+          crate::runtime::find_monitor_from_point(window.available_monitors(), position.x, position.y)
+        {
+          window.set_fullscreen(Some(Fullscreen::Borderless(Some(monitor))))
+        }
       }
       #[cfg(target_os = "macos")]
       WindowMessage::SetSimpleFullscreen(value) => {
@@ -1183,6 +1191,13 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     self.context.send_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::SetFullscreen(fullscreen),
+    })
+  }
+
+  fn set_fullscreen_on_monitor(&self, position: PhysicalPosition<f64>) -> Result<()> {
+    self.context.send_message(Message::Window {
+      window_id: self.window_id,
+      message: WindowMessage::SetFullscreenOnMonitor(position),
     })
   }
 

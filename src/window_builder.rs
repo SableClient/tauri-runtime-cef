@@ -263,6 +263,10 @@ impl WindowBuilder for WindowBuilderWrapper {
   }
 
   #[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
+  fn no_redirection_bitmap(self, _enable: bool) -> Self {
+    self
+  }
+
   fn transparent(mut self, transparent: bool) -> Self {
     self.attrs.inner = self.attrs.inner.with_transparent(transparent);
     self

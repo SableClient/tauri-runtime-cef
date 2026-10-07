@@ -256,6 +256,12 @@ pub(crate) fn handle_window_message(
         native.window.set_fullscreen(i32::from(fullscreen));
       }
     }
+    WindowMessage::SetFullscreenOnMonitor(_) => {
+      appwindow.attrs.inner.fullscreen = Some(winit::monitor::Fullscreen::Borderless(None));
+      if let Some(native) = native {
+        native.window.set_fullscreen(1);
+      }
+    }
     WindowMessage::SetFocus => {
       if let Some(native) = native {
         native.window.activate();
