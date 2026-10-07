@@ -255,6 +255,59 @@ wrap_request_context_handler! {
 /// hop otherwise), so by the time the browser finally issues its first
 /// navigation against any of these schemes the factories have been wired up
 /// on the IO thread.
+/// Chromium profile preferences forced off for every webview. The CEF runtime creates
+/// Chrome style browsers, so each webview inherits the browser-shaped behaviour that
+/// comes with a real Chrome profile; none of it belongs in an application webview.
+///
+/// * `credentials_enable_service`: the "Save password?" bubble on any form submit.
+/// * `profile.password_manager_leak_detection`: sends a hashed prefix of typed
+///   credentials to Google.
+/// * `autofill.profile_enabled`, `autofill.credit_card_enabled`: address and card bubbles.
+/// * `translate.enabled`: the translate bubble, which also ships page text to Google.
+/// * `alternate_error_pages.enabled`: sends a failed URL to Google for suggestions.
+/// * `search.suggest_enabled`: streams typed input to the default search engine.
+/// * `privacy_sandbox.m1.*`: Topics, Protected Audience and attribution reporting.
+///
+/// `safebrowsing.enabled` is deliberately absent: a webview loads content its developer
+/// does not control, and standard protection is a local hash-prefix database.
+const DISABLED_PREFERENCES: &[&str] = &[
+  "credentials_enable_service",
+  "profile.password_manager_leak_detection",
+  "autofill.profile_enabled",
+  "autofill.credit_card_enabled",
+  "translate.enabled",
+  "alternate_error_pages.enabled",
+  "search.suggest_enabled",
+  "privacy_sandbox.m1.topics_enabled",
+  "privacy_sandbox.m1.fledge_enabled",
+  "privacy_sandbox.m1.ad_measurement_enabled",
+];
+
+/// Turns [`DISABLED_PREFERENCES`] off on a request context. Must be called after the
+/// context has initialized. Which preferences a Chrome build registers as writable
+/// varies, so a refused one is logged at debug rather than warned about.
+fn apply_default_preferences(request_context: &RequestContext) {
+  use cef::ImplValue;
+
+  for name in DISABLED_PREFERENCES {
+    if request_context.can_set_preference(Some(&(*name).into())) != 1 {
+      log::debug!("the CEF request context does not allow setting the {name} preference");
+      continue;
+    }
+    let Some(value) = cef::value_create() else {
+      return;
+    };
+    value.set_bool(0);
+    let mut value = value;
+    let mut error = cef::CefString::from("");
+    if request_context.set_preference(Some(&(*name).into()), Some(&mut value), Some(&mut error))
+      != 1
+    {
+      log::debug!("failed to apply the {name} preference: {error}");
+    }
+  }
+}
+
 /// Applies a fixed-server proxy to a request context via the Chromium `proxy`
 /// preference. Must be called after the request context has initialized.
 fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
@@ -352,6 +405,9 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
       // The proxy preference can only be set once the request context's
       // underlying profile has finished initializing, which is exactly what
       // this continuation signals.
+      if let Some(rc) = rc.as_ref() {
+        apply_default_preferences(rc);
+      }
       if let (Some(rc), Some(proxy_url)) = (rc.as_ref(), proxy_url.as_ref()) {
         apply_proxy(rc, proxy_url);
       }
