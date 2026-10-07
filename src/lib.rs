@@ -13,6 +13,7 @@ mod platform;
 mod policy;
 mod runtime;
 mod streaming;
+mod switches;
 #[cfg(target_os = "linux")]
 mod wayland;
 mod webview;

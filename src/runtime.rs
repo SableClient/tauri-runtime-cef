@@ -1097,6 +1097,11 @@ wrap_app! {
       if let Some(command_line) = command_line {
         for (arg, value) in &self.command_line_args {
           if let Some(value) = value {
+            let name = arg.trim_start_matches('-');
+            if crate::switches::MERGED_SWITCHES.contains(&name) {
+              crate::switches::append_merged_switch(command_line, name, &[value.clone()]);
+              continue;
+            }
             command_line.append_switch_with_value(
               Some(&CefString::from(arg.as_str())),
               Some(&CefString::from(value.as_str())),
@@ -1492,6 +1497,7 @@ impl<T: UserEvent> CefRuntime<T> {
     // process-global crate config instead — see `crate::configure`.
     let cef_config = crate::config::config();
     let mut command_line_args = cef_config.command_line_args.clone();
+    crate::switches::warn_about_dangerous_switches(&command_line_args);
     let deep_link_schemes = cef_config.deep_link_schemes.clone();
 
     // Once the GPU mode fallback list is exhausted Chromium kills the browser

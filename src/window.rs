@@ -658,9 +658,11 @@ impl<T: UserEvent> WinitCefApp<T> {
         window.set_fullscreen(value.then_some(Fullscreen::Borderless(None)))
       }
       WindowMessage::SetFullscreenOnMonitor(position) => {
-        if let Some(monitor) =
-          crate::runtime::find_monitor_from_point(window.available_monitors(), position.x, position.y)
-        {
+        if let Some(monitor) = crate::runtime::find_monitor_from_point(
+          window.available_monitors(),
+          position.x,
+          position.y,
+        ) {
           window.set_fullscreen(Some(Fullscreen::Borderless(Some(monitor))))
         }
       }
