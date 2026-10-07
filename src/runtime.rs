@@ -1099,7 +1099,7 @@ wrap_app! {
           if let Some(value) = value {
             let name = arg.trim_start_matches('-');
             if crate::switches::MERGED_SWITCHES.contains(&name) {
-              crate::switches::append_merged_switch(command_line, name, &[value.clone()]);
+              crate::switches::append_merged_switch(command_line, name, std::slice::from_ref(value));
               continue;
             }
             command_line.append_switch_with_value(
