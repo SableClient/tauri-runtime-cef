@@ -1505,6 +1505,7 @@ impl<T: UserEvent> CefRuntime<T> {
     // panic and no log. Suspend/resume GPU resets get there on their own.
     // See `GpuDataManagerImplPrivate::FallBackToNextGpuMode`.
     command_line_args.push(("disable-gpu-process-crash-limit".to_string(), None));
+    command_line_args.push(("--no-first-run".to_string(), None));
 
     let cache_path = cef_config.cache_path.clone().unwrap_or_else(|| {
       let cache_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
