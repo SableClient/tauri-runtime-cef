@@ -57,6 +57,7 @@ wrap_life_span_handler! {
   impl LifeSpanHandler {
     fn on_after_created(&self, browser: Option<&mut Browser>) {
       if let Some(browser) = browser
+        && browser.is_popup() == 0
         && let Some(initial_url) = &self.initial_url
       {
         check_and_reload_if_blank(browser.clone(), initial_url.clone());
@@ -100,7 +101,7 @@ wrap_life_span_handler! {
     }
 
     fn on_before_close(&self, browser: Option<&mut Browser>) {
-      if browser.is_none() {
+      if browser.is_none_or(|browser| browser.is_popup() != 0) {
         return;
       }
       // Any permission prompt still open over this webview can no longer be
