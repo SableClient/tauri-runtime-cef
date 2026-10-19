@@ -4,19 +4,41 @@
 
 //! Helpers for the Chromium command line the runtime hands to CEF.
 //!
-//! A switch value replaces, it does not accumulate: `CommandLine::AppendSwitchNative`
-//! stores switches in a map keyed by name. CEF fills `--disable-features` before it calls
-//! `on_before_command_line_processing`, with a list that keeps Chrome from crashing at
-//! startup and renderers from being killed on CEF's own requests, so an application that
-//! appends its own drops all of it. The comma-delimited switches in [`MERGED_SWITCHES`]
-//! are merged instead.
+//! Two problems live here.
 //!
-//! Some switches also turn a security boundary off; [`warn_about_dangerous_switches`]
-//! says so out loud.
+//! # A switch value replaces, it does not accumulate
+//!
+//! Chromium's `CommandLine::AppendSwitchNative` stores switches in a map keyed by name,
+//! so appending a switch that is already there overwrites the previous value; nothing in
+//! Chrome, CEF or CEF's patches installs a `DuplicateSwitchHandler` that would merge them
+//! instead. For most switches that is what an embedder wants — the runtime relies on it
+//! so an application's own switch wins over a runtime default.
+//!
+//! For the comma-delimited ones it is a trap. CEF fills `--disable-features` before it
+//! calls `on_before_command_line_processing`, with a list that keeps Chrome from crashing
+//! at startup and keeps renderers from being killed on CEF's own requests, and an
+//! application that appends its own `--disable-features` silently drops all of it.
+//! [`append_merged_switch`] is the merging append those switches need, and
+//! [`REPLACING_SWITCHES`] is the list an application is warned about when it reaches for
+//! the raw API instead.
+//!
+//! # Some switches turn security off
+//!
+//! Chrome itself keeps a list of command line flags that "stability and security will
+//! suffer" from and shows an infobar naming them. A shipped Tauri application ignores its
+//! process command line entirely (see `Cef::allow_chromium_command_line_args`), so the
+//! only way one of those flags reaches Chromium is the application putting it there.
+//! [`warn_about_dangerous_switches`] says so out loud.
 
-/// Comma-delimited switches whose value CEF has already set, and which are merged into
-/// rather than replaced.
-pub(crate) const MERGED_SWITCHES: &[&str] = &["disable-features", "enable-features"];
+/// Switches whose value Chromium or CEF has already set by the time the application's own
+/// switches are appended, and which therefore replace rather than extend.
+///
+/// Each entry names the API that sets the same thing without dropping what is there.
+pub(crate) const REPLACING_SWITCHES: &[(&str, &str)] = &[
+  ("disable-features", "Cef::disable_features"),
+  ("enable-features", "Cef::enable_features"),
+  ("js-flags", "Cef::javascript_flags"),
+];
 
 /// Chromium switches that turn off a security boundary, mirroring the list Chrome warns
 /// about in `chrome/browser/ui/startup/bad_flags_prompt.cc`.
@@ -128,6 +150,19 @@ fn switch_key(argument: &str) -> &str {
   argument.trim_start_matches('-')
 }
 
+/// Warns about application switches that replace a value the runtime or CEF depends on.
+pub(crate) fn warn_about_replacing_switches(args: &[(String, Option<String>)]) {
+  for (argument, _) in args {
+    let key = switch_key(argument);
+    if let Some((_, replacement)) = REPLACING_SWITCHES.iter().find(|(name, _)| *name == key) {
+      log::warn!(
+        "the --{key} switch replaces the value Chromium and CEF already set rather than \
+         adding to it, which drops entries the runtime depends on. Use {replacement} instead."
+      );
+    }
+  }
+}
+
 /// Warns about application switches that turn off a security boundary.
 pub(crate) fn warn_about_dangerous_switches(args: &[(String, Option<String>)]) {
   for (argument, _) in args {
@@ -200,10 +235,34 @@ mod tests {
   }
 
   #[test]
-  fn the_feature_switches_are_merged_not_dangerous() {
-    assert!(MERGED_SWITCHES.contains(&"disable-features"));
-    assert!(MERGED_SWITCHES.contains(&"enable-features"));
+  fn every_replacing_switch_names_a_replacement() {
+    for (name, replacement) in REPLACING_SWITCHES {
+      assert!(!name.is_empty());
+      assert!(
+        replacement.starts_with("Cef::"),
+        "the warning tells the user what to call instead"
+      );
+    }
+  }
+
+  #[test]
+  fn the_two_lists_answer_different_questions() {
+    // `disable-features` replaces CEF's crash-avoidance list, which is a correctness
+    // problem rather than a security one, so it is warned about but not called dangerous.
+    assert!(
+      REPLACING_SWITCHES
+        .iter()
+        .any(|(name, _)| *name == "disable-features")
+    );
     assert!(!DANGEROUS_SWITCHES.contains(&"disable-features"));
+
+    // The blink feature switches turn boundaries off but overwrite nothing the runtime
+    // set, so they are only on the dangerous list.
     assert!(DANGEROUS_SWITCHES.contains(&"enable-blink-features"));
+    assert!(
+      !REPLACING_SWITCHES
+        .iter()
+        .any(|(name, _)| *name == "enable-blink-features")
+    );
   }
 }
