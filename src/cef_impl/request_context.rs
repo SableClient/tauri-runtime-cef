@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use tauri_runtime::webview::WebviewAttributes;
 use tauri_utils::Theme;
 
-use crate::cef_impl::request_handler;
+use crate::cef_impl::{preferences, request_handler};
 
 #[inline]
 fn theme_to_color_variant(theme: Option<Theme>) -> ColorVariant {
@@ -180,10 +180,10 @@ pub(crate) fn wait_for_deferred_init(flag: &Arc<AtomicBool>) {
 /// [`wait_for_deferred_init`] on this thread toggles the flag, which makes
 /// nesting (e.g. an `on_initialized` continuation that creates another
 /// webview) safe.
-pub(crate) struct AllowNestableTasks;
+struct AllowNestableTasks;
 
 impl AllowNestableTasks {
-  pub(crate) fn enter() -> Self {
+  fn enter() -> Self {
     NESTABLE_TASKS_DEPTH.with(|depth| {
       let current = depth.get();
       if current == 0 {
@@ -227,6 +227,39 @@ wrap_request_context_handler! {
   }
 }
 
+/// Applies a fixed-server proxy to a request context via the Chromium `proxy`
+/// preference. Must be called after the request context has initialized.
+///
+/// This is the per-webview `WebviewAttributes::proxy_url`; an application-wide proxy is
+/// the same preference written through `Cef::proxy`, and whichever is applied last wins
+/// on a given context.
+fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
+  let scheme = match proxy_url.scheme() {
+    "socks5" | "socks5h" => "socks5",
+    "socks4" | "socks4a" => "socks4",
+    "https" => "https",
+    _ => "http",
+  };
+  let Some(host) = proxy_url.host_str() else {
+    log::warn!("ignoring proxy URL without a host: {proxy_url}");
+    return;
+  };
+  let server = match proxy_url.port_or_known_default() {
+    Some(port) => format!("{scheme}://{host}:{port}"),
+    None => format!("{scheme}://{host}"),
+  };
+
+  // A webview that asked for a proxy and did not get one would silently send its traffic
+  // straight out, so unlike most preferences this one is worth a warning.
+  if !preferences::set_preference(
+    request_context,
+    "proxy",
+    &serde_json::json!({ "mode": "fixed_servers", "server": server }),
+  ) {
+    log::warn!("failed to apply the proxy preference to the CEF request context");
+  }
+}
+
 /// Creates a per-webview [`RequestContext`], registers Tauri's custom URI
 /// scheme handler factories on it, and arranges for `on_initialized` to fire
 /// once the underlying Chromium `Profile` is fully created.
@@ -255,107 +288,11 @@ wrap_request_context_handler! {
 /// hop otherwise), so by the time the browser finally issues its first
 /// navigation against any of these schemes the factories have been wired up
 /// on the IO thread.
-/// Chromium profile preferences forced off for every webview. The CEF runtime creates
-/// Chrome style browsers, so each webview inherits the browser-shaped behaviour that
-/// comes with a real Chrome profile; none of it belongs in an application webview.
-///
-/// * `credentials_enable_service`: the "Save password?" bubble on any form submit.
-/// * `profile.password_manager_leak_detection`: sends a hashed prefix of typed
-///   credentials to Google.
-/// * `autofill.profile_enabled`, `autofill.credit_card_enabled`: address and card bubbles.
-/// * `translate.enabled`: the translate bubble, which also ships page text to Google.
-/// * `alternate_error_pages.enabled`: sends a failed URL to Google for suggestions.
-/// * `search.suggest_enabled`: streams typed input to the default search engine.
-/// * `privacy_sandbox.m1.*`: Topics, Protected Audience and attribution reporting.
-///
-/// `safebrowsing.enabled` is deliberately absent: a webview loads content its developer
-/// does not control, and standard protection is a local hash-prefix database.
-const DISABLED_PREFERENCES: &[&str] = &[
-  "credentials_enable_service",
-  "profile.password_manager_leak_detection",
-  "autofill.profile_enabled",
-  "autofill.credit_card_enabled",
-  "translate.enabled",
-  "alternate_error_pages.enabled",
-  "search.suggest_enabled",
-  "privacy_sandbox.m1.topics_enabled",
-  "privacy_sandbox.m1.fledge_enabled",
-  "privacy_sandbox.m1.ad_measurement_enabled",
-];
-
-/// Turns [`DISABLED_PREFERENCES`] off on a request context. Must be called after the
-/// context has initialized. Which preferences a Chrome build registers as writable
-/// varies, so a refused one is logged at debug rather than warned about.
-fn apply_default_preferences(request_context: &RequestContext) {
-  use cef::ImplValue;
-
-  for name in DISABLED_PREFERENCES {
-    if request_context.can_set_preference(Some(&(*name).into())) != 1 {
-      log::debug!("the CEF request context does not allow setting the {name} preference");
-      continue;
-    }
-    let Some(value) = cef::value_create() else {
-      return;
-    };
-    value.set_bool(0);
-    let mut value = value;
-    let mut error = cef::CefString::from("");
-    if request_context.set_preference(Some(&(*name).into()), Some(&mut value), Some(&mut error))
-      != 1
-    {
-      log::debug!("failed to apply the {name} preference: {error}");
-    }
-  }
-}
-
-/// Applies a fixed-server proxy to a request context via the Chromium `proxy`
-/// preference. Must be called after the request context has initialized.
-fn apply_proxy(request_context: &RequestContext, proxy_url: &url::Url) {
-  use cef::{ImplDictionaryValue, ImplValue};
-
-  let scheme = match proxy_url.scheme() {
-    "socks5" | "socks5h" => "socks5",
-    "socks4" | "socks4a" => "socks4",
-    "https" => "https",
-    _ => "http",
-  };
-  let Some(host) = proxy_url.host_str() else {
-    log::warn!("ignoring proxy URL without a host: {proxy_url}");
-    return;
-  };
-  let server = match proxy_url.port_or_known_default() {
-    Some(port) => format!("{scheme}://{host}:{port}"),
-    None => format!("{scheme}://{host}"),
-  };
-
-  let pref_name = "proxy";
-  if request_context.can_set_preference(Some(&pref_name.into())) != 1 {
-    log::warn!("the CEF request context does not allow setting the proxy preference");
-    return;
-  }
-
-  // Build `{ "mode": "fixed_servers", "server": "<scheme>://<host>:<port>" }`.
-  let Some(dict) = cef::dictionary_value_create() else {
-    return;
-  };
-  dict.set_string(Some(&"mode".into()), Some(&"fixed_servers".into()));
-  dict.set_string(Some(&"server".into()), Some(&server.as_str().into()));
-
-  let Some(value) = cef::value_create() else {
-    return;
-  };
-  let mut dict = dict;
-  value.set_dictionary(Some(&mut dict));
-
-  let mut value = value;
-  if request_context.set_preference(Some(&pref_name.into()), Some(&mut value), None) != 1 {
-    log::error!("failed to apply the proxy preference to the CEF request context");
-  }
-}
-
 pub(crate) fn request_context_from_webview_attributes<'a>(
   global_cache_path: &Path,
   webview_attributes: &WebviewAttributes,
+  profile_preferences: Arc<Vec<(String, serde_json::Value)>>,
+  content_settings: Arc<Vec<(ContentSettingTypes, ContentSettingValues)>>,
   custom_schemes: impl IntoIterator<Item = &'a String>,
   custom_protocol_scheme: &str,
   scheme_registry: request_handler::SchemeRegistry,
@@ -381,14 +318,6 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 
   let settings = RequestContextSettings {
     cache_path,
-    // Per-context settings do not inherit the global value, so an empty list
-    // here would silently drop custom-scheme cookie support configured
-    // through `CefConfig::cookieable_schemes`.
-    cookieable_schemes_list: crate::config::config()
-      .cookieable_schemes
-      .join(",")
-      .as_str()
-      .into(),
     ..Default::default()
   };
 
@@ -402,14 +331,15 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
   let wrapped_callback: RequestContextInitContinuation = Box::new({
     let rc_holder = rc_holder.clone();
     move |rc| {
-      // The proxy preference can only be set once the request context's
-      // underlying profile has finished initializing, which is exactly what
-      // this continuation signals.
+      // Preferences and content settings can only be set once the request context's
+      // underlying profile has finished initializing, which is exactly what this
+      // continuation signals.
       if let Some(rc) = rc.as_ref() {
-        apply_default_preferences(rc);
-      }
-      if let (Some(rc), Some(proxy_url)) = (rc.as_ref(), proxy_url.as_ref()) {
-        apply_proxy(rc, proxy_url);
+        preferences::apply_app_webview_preferences(rc, &profile_preferences);
+        preferences::apply_default_content_settings(rc, &content_settings);
+        if let Some(proxy_url) = proxy_url.as_ref() {
+          apply_proxy(rc, proxy_url);
+        }
       }
       on_initialized(rc);
       let _released = rc_holder.lock().unwrap().take();
@@ -422,22 +352,9 @@ pub(crate) fn request_context_from_webview_attributes<'a>(
 
   if let Some(request_context) = request_context.as_ref() {
     for scheme in custom_schemes {
-      // Windows/Android-style form: `http(s)://<scheme>.localhost/…`.
       request_context.register_scheme_handler_factory(
         Some(&custom_protocol_scheme.into()),
         Some(&format!("{scheme}.localhost").as_str().into()),
-        Some(&mut request_handler::UriSchemeHandlerFactory::new(
-          scheme_registry.clone(),
-          scheme.clone(),
-        )),
-      );
-      // Native form published tauri emits on Linux/macOS:
-      // `<scheme>://localhost/…`. The scheme itself is made known to
-      // Chromium in `on_register_custom_schemes` (crate config list); an
-      // empty domain filter matches every host on the scheme.
-      request_context.register_scheme_handler_factory(
-        Some(&scheme.as_str().into()),
-        None,
         Some(&mut request_handler::UriSchemeHandlerFactory::new(
           scheme_registry.clone(),
           scheme.clone(),

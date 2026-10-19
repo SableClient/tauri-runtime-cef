@@ -8,7 +8,7 @@ use cef::*;
 
 wrap_download_handler! {
   pub struct TauriCefDownloadHandler {
-    download_handler: Arc<crate::compat::DownloadHandler>,
+    download_handler: Arc<tauri_runtime::webview::DownloadHandler>,
   }
 
   impl DownloadHandler {
