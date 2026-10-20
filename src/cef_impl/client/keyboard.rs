@@ -11,7 +11,7 @@ fn is_browser_shortcut(key_code: i32, primary_modifier: bool, alt: bool) -> bool
       9 | 33 | 34 | 49..=57 | 72 | 74 | 76 | 78 | 79 | 80 | 82 | 83 | 84 | 87
     ))
     || (alt && matches!(key_code, 37 | 39))
-    || matches!(key_code, 116 | 117 | 122)
+    || matches!(key_code, 112 | 116 | 117 | 122)
 }
 
 #[cfg(target_os = "linux")]
@@ -136,6 +136,7 @@ mod tests {
     assert!(is_browser_shortcut(84, true, false));
     assert!(is_browser_shortcut(9, true, false));
     assert!(is_browser_shortcut(37, false, true));
+    assert!(is_browser_shortcut(112, false, false));
     assert!(is_browser_shortcut(116, false, false));
   }
 
