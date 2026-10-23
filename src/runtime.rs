@@ -217,6 +217,15 @@ impl<T: UserEvent> RuntimeContext<T> {
   }
 
   pub(crate) fn send_message(&self, message: Message<T>) -> Result<()> {
+    // Exit requests are always queued because inline dispatch from a command handler
+    // holding the plugin store mutex re-locks it in `on_event_loop_event`, creating
+    // a deadlock.
+    if matches!(message, Message::RequestExit(_)) {
+      self.sender.send(message).map_err(|_| Error::FailedToSendMessage)?;
+      self.proxy.wake_up();
+      return Ok(());
+    }
+
     let message = if self.is_main_thread() {
       match handle_main_thread_message(self, message) {
         Ok(()) => return Ok(()),
