@@ -60,7 +60,7 @@ unsafe impl Send for PlatformPump {}
 
 impl PlatformPump {
   pub(super) fn new(state: Weak<PumpState>) -> Self {
-    // The runtime services callbacks from GLib's default MainContext.
+    // winit-gtk4 drives callbacks from GLib's default MainContext.
     let context = glib::MainContext::default();
 
     // Create our wakeup pipe, which is used to flag when work was scheduled.
