@@ -6,19 +6,46 @@ use cef::ImplBrowserHost;
 use tauri_runtime::dpi::{PhysicalPosition, PhysicalSize, Rect};
 use tauri_utils::config::Color;
 use windows::Win32::{
-  Foundation::{HWND, POINT, RECT},
+  Foundation::{ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, RECT, SetLastError, WPARAM},
   Graphics::Gdi::MapWindowPoints,
+  UI::Shell::{DefSubclassProc, SetWindowSubclass},
   UI::WindowsAndMessaging::{
-    DestroyWindow, GetParent, GetWindowRect, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SetParent, SetWindowPos, ShowWindow,
+    DestroyWindow, GetParent, GetWindowRect, HWND_TOP, IsWindow, IsWindowVisible, SW_HIDE, SW_SHOW,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetParent, SetWindowPos, ShowWindow,
+    WINDOWPOS, WM_WINDOWPOSCHANGING,
   },
 };
 
 use crate::{webview::AppWebview, window::AppWindow};
 
 impl AppWebview {
-  pub(crate) fn take_input_focus(&self) {
-    let _ = self;
+  pub(crate) fn native_parent_matches(&self, parent: &AppWindow) -> Option<bool> {
+    let hwnd = self.hwnd();
+    unsafe {
+      if !IsWindow(Some(hwnd)).as_bool() {
+        return None;
+      }
+      // `GetParent` returns NULL both for a window that has no parent and when
+      // the call itself fails, and the binding maps that NULL to an `Err`
+      // carrying the last error — so clear it first to tell the two apart.
+      SetLastError(ERROR_SUCCESS);
+      match GetParent(hwnd) {
+        Ok(native_parent) => Some(native_parent == parent.hwnd()),
+        // `ERROR_SUCCESS`: the window really has no parent, which is an
+        // observation of the relationship and not a failure to establish it.
+        Err(err) if err.code().is_ok() => Some(false),
+        Err(_) => None,
+      }
+    }
+  }
+
+  pub(crate) fn native_visible(&self) -> Option<bool> {
+    let hwnd = self.hwnd();
+    unsafe {
+      IsWindow(Some(hwnd))
+        .as_bool()
+        .then(|| IsWindowVisible(hwnd).as_bool())
+    }
   }
 
   pub(crate) fn hwnd(&self) -> HWND {
@@ -76,8 +103,75 @@ impl AppWebview {
     let _ = unsafe { ShowWindow(self.hwnd(), if visible { SW_SHOW } else { SW_HIDE }) };
   }
 
-  pub(crate) fn destroy_native(&self) {
+  /// Destroys CEF's own window for this browser, completing a close that
+  /// `do_close` took over. CEF's browser window procedure reports
+  /// `WindowDestroyed` back to CEF on `WM_NCDESTROY`.
+  pub(crate) fn destroy_host_window(&self) {
     let _ = unsafe { DestroyWindow(self.hwnd()) };
+  }
+
+  const PIN_Z_ORDER_SUBCLASS_ID: usize = 124;
+  /// `dwRefData` of the pin subclass: whether it is currently vetoing.
+  const Z_ORDER_UNPINNED: usize = 0;
+  const Z_ORDER_PINNED: usize = 1;
+
+  /// Refuses every z-order change to this webview while the pin is engaged.
+  unsafe extern "system" fn pin_z_order_subclass_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    pinned: usize,
+  ) -> LRESULT {
+    unsafe {
+      if pinned == Self::Z_ORDER_PINNED && msg == WM_WINDOWPOSCHANGING && lparam.0 != 0 {
+        let window_pos = &mut *(lparam.0 as *mut WINDOWPOS);
+        window_pos.flags |= SWP_NOZORDER;
+      }
+
+      DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+  }
+
+  /// Engages or disengages the z-order pin.
+  ///
+  /// Re-installing the same proc under the same id does not chain a second
+  /// subclass, it just updates `dwRefData` — so this both installs the pin the
+  /// first time and toggles it afterwards.
+  fn set_z_order_pinned(&self, pinned: bool) {
+    let _ = unsafe {
+      SetWindowSubclass(
+        self.hwnd(),
+        Some(Self::pin_z_order_subclass_proc),
+        Self::PIN_Z_ORDER_SUBCLASS_ID,
+        if pinned {
+          Self::Z_ORDER_PINNED
+        } else {
+          Self::Z_ORDER_UNPINNED
+        },
+      )
+    };
+  }
+
+  /// Raises this webview above its siblings and pins it there, so nothing but
+  /// this runtime can move it again. See [`Self::pin_z_order_subclass_proc`].
+  pub(crate) fn raise_to_top(&self) {
+    self.set_z_order_pinned(false);
+
+    let _ = unsafe {
+      SetWindowPos(
+        self.hwnd(),
+        Some(HWND_TOP),
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+      )
+    };
+
+    self.set_z_order_pinned(true);
   }
 
   pub(crate) fn apply_physical_bounds(&self, _scale: f64, x: i32, y: i32, width: i32, height: i32) {
