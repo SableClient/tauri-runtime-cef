@@ -152,38 +152,17 @@ pub(crate) fn on_process_message_received<T: UserEvent>(
   let body = CefString::from(&args.string(1)).to_string();
 
   if let Ok(request) = http::Request::builder().uri(url).body(body) {
-    let webview = DetachedWebview {
-      label: client.label.clone(),
-      dispatcher: CefWebviewDispatcher {
-        window_id: Arc::new(Mutex::new(client.window_id)),
-        webview_id: client.webview_id,
-        context: client.context.clone(),
+    handler(
+      DetachedWebview {
+        label: client.label.clone(),
+        dispatcher: CefWebviewDispatcher {
+          window_id: Arc::new(Mutex::new(client.window_id)),
+          webview_id: client.webview_id,
+          context: client.context.clone(),
+        },
       },
-    };
-    // Run the handler through the event loop instead of inside this CEF
-    // callout. A sync tauri command that round-trips the loop (window
-    // creation, blocking getters) would otherwise self-deadlock whenever this
-    // callout runs on the main thread OUTSIDE a winit callback — no current
-    // dispatch is installed, so the round-trip queues a message the parked
-    // loop can never drain. That is the steady state on macOS, where CEF work
-    // is pumped from NSRunLoop timer callouts (huddle pop-out froze the whole
-    // browser process). Where a dispatch IS installed (Linux services CEF via
-    // glib inside winit callbacks), send_message degenerates to the same
-    // inline call as before.
-    //
-    // ThreadSafe: the handler Arc is not Sync, but it never actually crosses
-    // threads — this callout runs on the CEF UI thread (the runtime main
-    // thread), and Message::Task closures execute on that same thread.
-    let handler = crate::cef_impl::request_handler::ThreadSafe(handler.clone());
-    if let Err(error) = client
-      .context
-      .send_message(crate::runtime::Message::Task(Box::new(move || {
-        (handler.into_owned())(webview, request);
-      })))
-    {
-      // Only fails when the loop is gone (shutdown) — the invoke is moot then.
-      log::debug!("dropped webview IPC message: {error}");
-    }
+      request,
+    );
   }
   1
 }
